@@ -21,7 +21,7 @@ export default function Login() {
             setStep(2);
         } else {
             // SYNC with the Central Database
-            fetch(`${API_BASE_URL}/api/login`, {
+          fetch(`${API_BASE_URL}/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password, name, role })
