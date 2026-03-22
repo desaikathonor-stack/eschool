@@ -61,12 +61,45 @@ export default function Education() {
         setShowResult(false);
     };
 
+    const calculateMatchPercentage = (studentAns, teacherAns) => {
+        if (!studentAns || !teacherAns) return 0;
+        const sWords = studentAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
+        const tWords = teacherAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
+        if (tWords.length === 0) return 0;
+
+        // Count how many teacher answer keywords are present in student answer
+        const sSet = new Set(sWords);
+        let matchCount = 0;
+        tWords.forEach(w => {
+            if (sSet.has(w)) matchCount++;
+        });
+        return (matchCount / tWords.length) * 100;
+    };
+
     const submitQuiz = () => {
         let score = 0;
+        const totalMax = activeQuiz.questions.length;
+
         activeQuiz.questions.forEach((q, idx) => {
-            if (answers[idx] === q.correct) score++;
+            if (q.type === 'descriptive') {
+                const matchPct = calculateMatchPercentage(answers[idx], q.answerKey);
+
+                let targetMatch = 85;
+                if (q.level === 'hard') targetMatch = 75;
+                else if (q.level === 'medium') targetMatch = 80;
+                else if (q.level === 'easy') targetMatch = 85;
+
+                if (matchPct >= targetMatch) {
+                    score += 1;
+                } else {
+                    let partial = (matchPct / targetMatch);
+                    score += partial;
+                }
+            } else {
+                if (answers[idx] === q.correct) score++;
+            }
         });
-        const percentage = Math.round((score / activeQuiz.questions.length) * 100) + '%';
+        const percentage = Math.round((score / totalMax) * 100) + '%';
 
         fetch('http://localhost:5000/api/attempts', {
             method: 'POST',
@@ -99,22 +132,31 @@ export default function Education() {
                     {activeQuiz.questions.map((q, idx) => (
                         <div key={idx} style={{ padding: '1.5rem', background: 'var(--bg-dark)', borderRadius: '12px', border: '1px solid var(--border-color)' }}>
                             <h3 style={{ marginBottom: '1rem', fontSize: '1.2rem', color: 'var(--text-main)' }}>Q{idx + 1}: {q.q}</h3>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
-                                {q.options.map((opt, optIdx) => (
-                                    <div key={optIdx} style={{
-                                        padding: '1rem', borderRadius: '8px',
-                                        background: q.correct === optIdx ? 'rgba(16, 185, 129, 0.1)' : 'var(--glass-bg)',
-                                        border: q.correct === optIdx ? '1px solid #10b981' : '1px solid var(--border-color)',
-                                        opacity: q.correct === optIdx ? 1 : 0.6
-                                    }}>
-                                        <span style={{ fontWeight: 600, marginRight: '8px', color: q.correct === optIdx ? '#10b981' : 'var(--text-muted)' }}>
-                                            {String.fromCharCode(65 + optIdx)}.
-                                        </span>
-                                        {opt}
-                                        {q.correct === optIdx && <CheckCircle size={16} style={{ float: 'right', color: '#10b981' }} />}
+                            {q.type === 'descriptive' ? (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                    <div style={{ padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.3)', borderRadius: '8px' }}>
+                                        <p style={{ fontSize: '0.85rem', color: 'var(--primary)', fontWeight: 600, marginBottom: '4px' }}>Teacher Answer Key:</p>
+                                        <p style={{ color: 'var(--text-main)' }}>{q.answerKey}</p>
                                     </div>
-                                ))}
-                            </div>
+                                </div>
+                            ) : (
+                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+                                    {q.options.map((opt, optIdx) => (
+                                        <div key={optIdx} style={{
+                                            padding: '1rem', borderRadius: '8px',
+                                            background: q.correct === optIdx ? 'rgba(16, 185, 129, 0.1)' : 'var(--glass-bg)',
+                                            border: q.correct === optIdx ? '1px solid #10b981' : '1px solid var(--border-color)',
+                                            opacity: q.correct === optIdx ? 1 : 0.6
+                                        }}>
+                                            <span style={{ fontWeight: 600, marginRight: '8px', color: q.correct === optIdx ? '#10b981' : 'var(--text-muted)' }}>
+                                                {String.fromCharCode(65 + optIdx)}.
+                                            </span>
+                                            {opt}
+                                            {q.correct === optIdx && <CheckCircle size={16} style={{ float: 'right', color: '#10b981' }} />}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     ))}
                 </div>
@@ -170,23 +212,33 @@ export default function Education() {
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', flex: 1 }}>
-                    {q.options.map((opt, optIdx) => (
-                        <button
-                            key={optIdx}
-                            onClick={() => setAnswers({ ...answers, [currentIdx]: optIdx })}
-                            style={{
-                                padding: '1.5rem', textAlign: 'left', fontSize: '1.1rem', borderRadius: '12px',
-                                border: answers[currentIdx] === optIdx ? '2px solid var(--primary)' : '2px solid var(--border-color)',
-                                background: answers[currentIdx] === optIdx ? 'rgba(99, 102, 241, 0.1)' : 'var(--glass-bg)',
-                                color: 'var(--text-main)', cursor: 'pointer', transition: 'all 0.2s'
-                            }}
-                        >
-                            <span style={{ display: 'inline-block', width: '30px', height: '30px', textAlign: 'center', lineHeight: '28px', borderRadius: '50%', background: answers[currentIdx] === optIdx ? 'var(--primary)' : 'rgba(255,255,255,0.1)', marginRight: '1rem', color: 'white' }}>
-                                {String.fromCharCode(65 + optIdx)}
-                            </span>
-                            {opt}
-                        </button>
-                    ))}
+                    {q.type === 'descriptive' ? (
+                        <textarea
+                            value={answers[currentIdx] || ''}
+                            onChange={(e) => setAnswers({ ...answers, [currentIdx]: e.target.value })}
+                            placeholder="Type your answer here..."
+                            className="input-base"
+                            style={{ flex: 1, resize: 'none', background: 'var(--glass-bg)', fontSize: '1.1rem', padding: '1.5rem' }}
+                        />
+                    ) : (
+                        q.options.map((opt, optIdx) => (
+                            <button
+                                key={optIdx}
+                                onClick={() => setAnswers({ ...answers, [currentIdx]: optIdx })}
+                                style={{
+                                    padding: '1.5rem', textAlign: 'left', fontSize: '1.1rem', borderRadius: '12px',
+                                    border: answers[currentIdx] === optIdx ? '2px solid var(--primary)' : '2px solid var(--border-color)',
+                                    background: answers[currentIdx] === optIdx ? 'rgba(99, 102, 241, 0.1)' : 'var(--glass-bg)',
+                                    color: 'var(--text-main)', cursor: 'pointer', transition: 'all 0.2s'
+                                }}
+                            >
+                                <span style={{ display: 'inline-block', width: '30px', height: '30px', textAlign: 'center', lineHeight: '28px', borderRadius: '50%', background: answers[currentIdx] === optIdx ? 'var(--primary)' : 'rgba(255,255,255,0.1)', marginRight: '1rem', color: 'white' }}>
+                                    {String.fromCharCode(65 + optIdx)}
+                                </span>
+                                {opt}
+                            </button>
+                        ))
+                    )}
                 </div>
 
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '2rem', paddingTop: '2rem', borderTop: '1px solid var(--border-color)' }}>
