@@ -18,7 +18,7 @@ const db = new sqlite3.Database('./eschool.db');
 db.serialize(() => {
     db.run("CREATE TABLE IF NOT EXISTS users (email TEXT PRIMARY KEY, password TEXT, name TEXT, role TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS todos (id INTEGER PRIMARY KEY AUTOINCREMENT, user_email TEXT, text TEXT, completed BOOLEAN, reminder TEXT, reminderSent BOOLEAN)");
-    db.run("CREATE TABLE IF NOT EXISTS assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, dueDate TEXT, fileName TEXT, submissions TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, description TEXT, dueDate TEXT, fileName TEXT, submissions TEXT, difficulty TEXT, answerKeyText TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS quizzes (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, module TEXT, timeLimit TEXT, questions TEXT, showResultImmediately BOOLEAN)");
     db.run("CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, quiz_id INTEGER, student_email TEXT, score TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS whiteboards (email TEXT PRIMARY KEY, slides_data TEXT)");
@@ -112,10 +112,12 @@ app.get('/api/assignments', (req, res) => {
 });
 
 app.post('/api/assignments', (req, res) => {
-    const { title, description, dueDate, fileName } = req.body;
-    db.run("INSERT INTO assignments (title, description, dueDate, fileName, submissions) VALUES (?, ?, ?, ?, '[]')", [title, description, dueDate, fileName], function (err) {
-        res.json({ id: this.lastID, title, description, dueDate, fileName, submissions: [] });
-    });
+    const { title, description, dueDate, fileName, difficulty, answerKeyText } = req.body;
+    db.run("INSERT INTO assignments (title, description, dueDate, fileName, difficulty, answerKeyText, submissions) VALUES (?, ?, ?, ?, ?, ?, '[]')",
+        [title, description, dueDate, fileName, difficulty, answerKeyText], function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ id: this.lastID, title, description, dueDate, fileName, difficulty, answerKeyText, submissions: [] });
+        });
 });
 
 app.patch('/api/assignments/:id/submit', (req, res) => {

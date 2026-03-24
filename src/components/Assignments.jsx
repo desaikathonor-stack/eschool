@@ -1,5 +1,10 @@
 import { useState, useEffect } from 'react';
-import { Plus, Save, Upload, Download, FileText, CheckCircle, Clock, Users, X, AlertCircle, Trash2 } from 'lucide-react';
+import { Plus, Save, Upload, Download, FileText, CheckCircle, Clock, Users, X, AlertCircle, Trash2, CheckSquare, TrendingUp } from 'lucide-react';
+import API_BASE_URL from '../utils/api';
+import mammoth from 'mammoth';
+import * as pdfjsLib from 'pdfjs-dist';
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 export default function Assignments({ role }) {
     const [assignments, setAssignments] = useState([]);
@@ -9,12 +14,18 @@ export default function Assignments({ role }) {
     const [newTitle, setNewTitle] = useState('');
     const [newDesc, setNewDesc] = useState('');
     const [newDueDate, setNewDueDate] = useState('');
+    const [newDifficulty, setNewDifficulty] = useState('medium');
     const [teacherFile, setTeacherFile] = useState(null);
+    const [answerKeyFile, setAnswerKeyFile] = useState(null);
+    const [evaluatingSub, setEvaluatingSub] = useState(null);
 
     // Student Upload State
     const [activeAssignmentId, setActiveAssignmentId] = useState(null);
     const [studentFile, setStudentFile] = useState(null);
     const [uploadError, setUploadError] = useState('');
+
+    // Curve Grading state
+    const [curveSettings, setCurveSettings] = useState({});
 
     const currentUserEmail = localStorage.getItem('eschool_current_user') || 'anonymous_student';
 
@@ -23,10 +34,51 @@ export default function Assignments({ role }) {
     }, []);
 
     const fetchAssignments = () => {
-        fetch('http://localhost:5000/api/assignments')
+        fetch(`${API_BASE_URL}/assignments`)
             .then(res => res.json())
             .then(data => setAssignments(data))
             .catch(err => console.error("Fetch assignments error:", err));
+    };
+
+    const extractTextFromFile = async (file) => {
+        if (!file) return '';
+        try {
+            if (file.name.endsWith('.docx')) {
+                const arrayBuffer = await file.arrayBuffer();
+                const result = await mammoth.extractRawText({ arrayBuffer });
+                return result.value.trim();
+            } else if (file.name.endsWith('.pdf')) {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                let text = '';
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const content = await page.getTextContent();
+                    text += content.items.map(item => item.str).join(' ') + ' ';
+                }
+                return text.trim();
+            } else {
+                const text = await file.text();
+                return text.trim();
+            }
+        } catch (err) {
+            console.error("Extraction error", err);
+            return '';
+        }
+    };
+
+    const calculateMatchPercentage = (studentAns, teacherAns) => {
+        if (!studentAns || !teacherAns) return 0;
+        const sWords = studentAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
+        const tWords = teacherAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
+        if (tWords.length === 0) return 0;
+
+        const sSet = new Set(sWords);
+        let matchCount = 0;
+        tWords.forEach(w => {
+            if (sSet.has(w)) matchCount++;
+        });
+        return (matchCount / tWords.length) * 100;
     };
 
     // --- TEACHER ACTIONS ---
@@ -36,18 +88,25 @@ export default function Assignments({ role }) {
         }
     };
 
-    const handleCreateAssignment = (e) => {
+    const handleCreateAssignment = async (e) => {
         e.preventDefault();
         if (!newTitle || !newDueDate) return;
+
+        let answerKeyText = '';
+        if (answerKeyFile) {
+            answerKeyText = await extractTextFromFile(answerKeyFile);
+        }
 
         const newAssignment = {
             title: newTitle,
             description: newDesc,
             dueDate: newDueDate,
-            fileName: teacherFile ? teacherFile.name : null
+            difficulty: newDifficulty,
+            fileName: teacherFile ? teacherFile.name : null,
+            answerKeyText: answerKeyText
         };
 
-        fetch('http://localhost:5000/api/assignments', {
+        fetch(`${API_BASE_URL}/assignments`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(newAssignment)
@@ -60,11 +119,12 @@ export default function Assignments({ role }) {
                 setNewDesc('');
                 setNewDueDate('');
                 setTeacherFile(null);
+                setAnswerKeyFile(null);
             });
     };
 
     const deleteAssignment = (id) => {
-        fetch(`http://localhost:5000/api/assignments/${id}`, { method: 'DELETE' })
+        fetch(`${API_BASE_URL}/assignments/${id}`, { method: 'DELETE' })
             .then(() => setAssignments(assignments.filter(a => a.id !== id)));
     };
 
@@ -92,7 +152,7 @@ export default function Assignments({ role }) {
         }
     };
 
-    const handeSubmitAssignment = (assignmentId) => {
+    const handeSubmitAssignment = async (assignmentId) => {
         if (!studentFile) {
             setUploadError('Please select a file to upload.');
             return;
@@ -106,14 +166,17 @@ export default function Assignments({ role }) {
         const isLate = now > due;
         const status = isLate ? 'Late Submitted' : 'Submitted in time';
 
+        const extractedText = await extractTextFromFile(studentFile);
+
         const newSubmission = {
             studentEmail: currentUserEmail,
             fileName: studentFile.name,
             submittedAt: now.toISOString(),
-            status: status
+            status: status,
+            submissionText: extractedText
         };
 
-        fetch(`http://localhost:5000/api/assignments/${assignmentId}/submit`, {
+        fetch(`${API_BASE_URL}/assignments/${assignmentId}/submit`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ submission: newSubmission })
@@ -123,6 +186,73 @@ export default function Assignments({ role }) {
                 setStudentFile(null);
                 setActiveAssignmentId(null);
             });
+    };
+
+    const handleAutoGrade = (assignment, sub) => {
+        if (!assignment.answerKeyText || !sub.submissionText) {
+            alert('Cannot auto-grade. Please ensure both an Answer Key was uploaded and the student submitted a readable PDF/Docx.');
+            return;
+        }
+
+        const matchPct = calculateMatchPercentage(sub.submissionText, assignment.answerKeyText);
+        let targetMatch = 85;
+        if (assignment.difficulty === 'hard') targetMatch = 75;
+        else if (assignment.difficulty === 'medium') targetMatch = 80;
+        else if (assignment.difficulty === 'easy') targetMatch = 85;
+
+        let score = (matchPct >= targetMatch) ? 1.0 : (matchPct / targetMatch);
+        score = Math.min(1.0, score); // clamp to 1.0
+
+        setEvaluatingSub({
+            studentId: sub.studentEmail,
+            match: matchPct.toFixed(1) + '%',
+            target: targetMatch + '%',
+            score: (score * 100).toFixed(1) + '%'
+        });
+    };
+
+    const handleCurveSettingChange = (assignmentId, val) => {
+        setCurveSettings(prev => ({ ...prev, [assignmentId]: val }));
+    };
+
+    const exportCurvedGradesCSV = (assignment) => {
+        if (!assignment.answerKeyText) {
+            alert("Cannot curve without an answer key!");
+            return;
+        }
+        const maxScore = parseFloat(curveSettings[assignment.id]);
+        if (isNaN(maxScore) || maxScore <= 0) {
+            alert("Please enter a valid max score for the top student.");
+            return;
+        }
+
+        // Calculate raw match for everyone
+        let mapped = assignment.submissions.map(sub => {
+            const pct = calculateMatchPercentage(sub.submissionText, assignment.answerKeyText);
+            return { ...sub, rawMatchPct: pct };
+        });
+
+        // Identify highest raw score
+        const topMatch = Math.max(...mapped.map(s => s.rawMatchPct), 0);
+
+        // Build CSV text
+        let csvContent = "data:text/csv;charset=utf-8,";
+        csvContent += "Student Email,Submission Time,Status,Raw Keyword Match %,Curved Final Score\n";
+
+        mapped.forEach(sub => {
+            let curved = topMatch > 0 ? (sub.rawMatchPct / topMatch) * maxScore : 0;
+            // Cap it at maxScore just in case
+            curved = Math.min(curved, maxScore);
+            csvContent += `${sub.studentEmail},${new Date(sub.submittedAt).toLocaleString().replace(/,/g, '')},${sub.status},${sub.rawMatchPct.toFixed(2)}%,${curved.toFixed(2)}\n`;
+        });
+
+        const encodedUri = encodeURI(csvContent);
+        const link = document.createElement("a");
+        link.setAttribute("href", encodedUri);
+        link.setAttribute("download", `Curved_Grades_${assignment.title.replace(/\s+/g, '_')}.csv`);
+        document.body.appendChild(link); // Required for FF
+        link.click();
+        document.body.removeChild(link);
     };
 
     const downloadMock = (fileName) => {
@@ -160,12 +290,12 @@ export default function Assignments({ role }) {
 
                         <div style={{ display: 'flex', gap: '1.5rem' }}>
                             <div style={{ flex: 1 }}>
-                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Upload Attachment (Optional)</label>
+                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Upload Question Paper (PDF/Docx)</label>
                                 <div style={{ position: 'relative', width: '100%' }}>
-                                    <input type="file" onChange={handleTeacherFileChange} style={{ display: 'none' }} id="teacherFileInput" />
+                                    <input type="file" accept=".pdf,.docx" onChange={handleTeacherFileChange} style={{ display: 'none' }} id="teacherFileInput" />
                                     <label htmlFor="teacherFileInput" className="input-base" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', background: 'var(--bg-dark)' }}>
                                         <Upload size={18} color="var(--primary)" />
-                                        {teacherFile ? teacherFile.name : 'Choose file...'}
+                                        {teacherFile ? teacherFile.name : 'Choose question paper...'}
                                     </label>
                                     {teacherFile && (
                                         <button type="button" onClick={(e) => { e.preventDefault(); setTeacherFile(null); document.getElementById('teacherFileInput').value = ''; }} style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', color: '#ef4444', padding: '4px' }}>
@@ -173,6 +303,32 @@ export default function Assignments({ role }) {
                                         </button>
                                     )}
                                 </div>
+                            </div>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Upload Answer Key (For Auto-Grading)</label>
+                                <div style={{ position: 'relative', width: '100%' }}>
+                                    <input type="file" accept=".pdf,.docx" onChange={e => setAnswerKeyFile(e.target.files[0])} style={{ display: 'none' }} id="answerKeyInput" />
+                                    <label htmlFor="answerKeyInput" className="input-base" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                                        <CheckCircle size={18} color="#10b981" />
+                                        {answerKeyFile ? answerKeyFile.name : 'Provide Answer Key...'}
+                                    </label>
+                                    {answerKeyFile && (
+                                        <button type="button" onClick={(e) => { e.preventDefault(); setAnswerKeyFile(null); document.getElementById('answerKeyInput').value = ''; }} style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', color: '#ef4444', padding: '4px' }}>
+                                            <X size={16} />
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem' }}>
+                            <div style={{ flex: 1 }}>
+                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Evaluation Difficulty</label>
+                                <select value={newDifficulty} onChange={e => setNewDifficulty(e.target.value)} className="input-base" style={{ background: 'var(--bg-dark)' }}>
+                                    <option value="easy">Easy (Requires 85% match)</option>
+                                    <option value="medium">Medium (Requires 80% match)</option>
+                                    <option value="hard">Hard (Requires 75% match)</option>
+                                </select>
                             </div>
                             <div style={{ flex: 1 }}>
                                 <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Due Date & Time</label>
@@ -240,15 +396,60 @@ export default function Assignments({ role }) {
                                         {assignment.submissions.length === 0 ? (
                                             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No submissions yet.</p>
                                         ) : (
-                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                                                {evaluatingSub && (
+                                                    <div style={{ padding: '15px', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+                                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                                                            <strong style={{ color: 'var(--primary)' }}>Auto-Grade Result for {evaluatingSub.studentId}</strong>
+                                                            <button onClick={() => setEvaluatingSub(null)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={16} /></button>
+                                                        </div>
+                                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginTop: '10px' }}>
+                                                            <div>
+                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Match % Found</div>
+                                                                <div style={{ fontSize: '1.2rem', fontWeight: 600 }}>{evaluatingSub.match}</div>
+                                                            </div>
+                                                            <div>
+                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Target to hit</div>
+                                                                <div style={{ fontSize: '1.2rem', fontWeight: 600 }}>{evaluatingSub.target}</div>
+                                                            </div>
+                                                            <div>
+                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Final Score</div>
+                                                                <div style={{ fontSize: '1.2rem', fontWeight: 600, color: '#10b981' }}>{evaluatingSub.score}</div>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+
+                                                {assignment.answerKeyText && assignment.submissions.length > 0 && (
+                                                    <div style={{ padding: '15px', background: 'rgba(99, 102, 241, 0.05)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.2)', marginBottom: '0.5rem' }}>
+                                                        <h5 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--primary)' }}>
+                                                            <TrendingUp size={16} /> Relative Curve Grading
+                                                        </h5>
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                                            <div style={{ flex: 1 }}>
+                                                                <input type="number" value={curveSettings[assignment.id] || ''} onChange={(e) => handleCurveSettingChange(assignment.id, e.target.value)} placeholder="Marks for top student (e.g. 100)" className="input-base" style={{ padding: '8px 12px', background: 'var(--bg-dark)' }} />
+                                                            </div>
+                                                            <button onClick={() => exportCurvedGradesCSV(assignment)} className="btn-primary" style={{ padding: '8px 16px', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                                                <Download size={14} /> Export Marks (CSV)
+                                                            </button>
+                                                        </div>
+                                                        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '8px 0 0 0' }}>The system finds the highest matching PDF, assigns them the marks above, and auto-distributes relative proportional marks to everyone else.</p>
+                                                    </div>
+                                                )}
+
                                                 {assignment.submissions.map((sub, i) => (
                                                     <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 16px', background: 'var(--bg-dark)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
                                                         <div>
                                                             <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{sub.studentEmail}</div>
-                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.25rem' }}>
+                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.25rem' }}>
                                                                 <button onClick={() => downloadMock(sub.fileName)} style={{ color: 'var(--primary)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
                                                                     <Download size={14} /> {sub.fileName}
                                                                 </button>
+                                                                {assignment.answerKeyText && sub.submissionText && (
+                                                                    <button onClick={() => handleAutoGrade(assignment, sub)} style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', border: 'none', borderRadius: '4px', padding: '2px 8px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
+                                                                        <CheckSquare size={14} /> Grade with AI Tool
+                                                                    </button>
+                                                                )}
                                                             </div>
                                                         </div>
                                                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
