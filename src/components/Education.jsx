@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { PlayCircle, CheckCircle, FileText, Award, ArrowRight, ArrowLeft, X } from 'lucide-react';
+import API_BASE_URL from '../utils/api';
 
 const MOCK_VIDEOS = [
     { id: 1, module: 'Module 1', title: 'Introduction to Web & HTML', duration: '10:00', youtubeId: '9J1nJOivdyw' },
@@ -34,10 +35,10 @@ export default function Education() {
     }, []);
 
     const loadQuizzes = () => {
-        fetch('http://localhost:5000/api/quizzes')
+        fetch(`${API_BASE_URL}/quizzes`)
             .then(res => res.json())
             .then(allQuizzes => {
-                fetch(`http://localhost:5000/api/attempts/${currentUserEmail}`)
+                fetch(`${API_BASE_URL}/attempts/${currentUserEmail}`)
                     .then(res => res.json())
                     .then(attempts => {
                         const decorated = allQuizzes.map(q => {
@@ -101,7 +102,7 @@ export default function Education() {
         });
         const percentage = Math.round((score / totalMax) * 100) + '%';
 
-        fetch('http://localhost:5000/api/attempts', {
+        fetch(`${API_BASE_URL}/attempts`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -171,7 +172,7 @@ export default function Education() {
                     <Award size={64} color="#10b981" style={{ marginBottom: '1rem' }} />
                     <h2 className="text-gradient" style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>Quiz Completed!</h2>
 
-                    {activeQuiz.showResultImmediately === false ? (
+                    {!activeQuiz.showResultImmediately ? (
                         <div style={{ marginBottom: '2rem' }}>
                             <p style={{ color: 'var(--text-main)', fontSize: '1.2rem', marginBottom: '1rem' }}>
                                 Your answers have been recorded successfully.
@@ -386,7 +387,7 @@ export default function Education() {
                             {quiz.status === 'completed' ? (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px', background: 'var(--glass-bg)', borderRadius: '8px' }}>
-                                        {quiz.showResultImmediately === false ? (
+                                        {!quiz.showResultImmediately ? (
                                             <span style={{ color: 'var(--primary)', fontSize: '0.95rem' }}>Awaiting emailed results...</span>
                                         ) : (
                                             <>

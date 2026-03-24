@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Plus, Save, Trash2, Globe, Mail } from 'lucide-react';
+import API_BASE_URL from '../utils/api';
 import mammoth from 'mammoth';
 import * as pdfjsLib from 'pdfjs-dist';
 
@@ -76,14 +77,14 @@ export default function TeacherQuizSettings() {
     };
 
     const fetchAttempts = () => {
-        fetch('http://localhost:5000/api/admin/attempts')
+        fetch(`${API_BASE_URL}/admin/attempts`)
             .then(res => res.json())
             .then(data => setAttempts(data || []))
             .catch(err => console.error("Fetch attempts error:", err));
     };
 
     const fetchQuizzes = () => {
-        fetch('http://localhost:5000/api/quizzes')
+        fetch(`${API_BASE_URL}/quizzes`)
             .then(res => res.json())
             .then(data => setQuizzes(data))
             .catch(err => console.error("Fetch quizzes error:", err));
@@ -160,13 +161,17 @@ export default function TeacherQuizSettings() {
             showResultImmediately: newQuiz.showResultImmediately
         };
 
-        fetch('http://localhost:5000/api/quizzes', {
+        fetch(`${API_BASE_URL}/quizzes`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(created)
         })
-            .then(res => res.json())
+            .then(res => {
+                if (!res.ok) throw new Error(`Server error: ${res.status}`);
+                return res.json();
+            })
             .then(data => {
+                if (data.error) throw new Error(data.error);
                 setQuizzes([...quizzes, data]);
                 setIsCreating(false);
                 setNewQuiz({ title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, generalAnswerKeyFile: null });
@@ -179,11 +184,16 @@ export default function TeacherQuizSettings() {
                     answerKey: '',
                     answerKeyFile: null
                 })));
+                alert('Quiz published successfully!');
+            })
+            .catch(err => {
+                console.error('Failed to publish quiz:', err);
+                alert('Failed to publish quiz: ' + err.message);
             });
     };
 
     const unpublish = (id) => {
-        fetch(`http://localhost:5000/api/quizzes/${id}`, { method: 'DELETE' })
+        fetch(`${API_BASE_URL}/quizzes/${id}`, { method: 'DELETE' })
             .then(() => setQuizzes(quizzes.filter(q => q.id !== id)));
     };
 
@@ -373,7 +383,7 @@ export default function TeacherQuizSettings() {
                             ))}
                             {attempts.length === 0 && (
                                 <tr>
-                                    <td colSpan="4" style={{ padding: '30px', textAlign: 'center', color: 'var(--text-muted)' }}>No quiz submissions found yet.</td>
+                                    <td colSpan="5" style={{ padding: '30px', textAlign: 'center', color: 'var(--text-muted)' }}>No quiz submissions found yet.</td>
                                 </tr>
                             )}
                         </tbody>

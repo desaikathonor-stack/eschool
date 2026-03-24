@@ -138,16 +138,25 @@ app.delete('/api/assignments/:id', (req, res) => {
 // --- QUIZZES ---
 app.get('/api/quizzes', (req, res) => {
     db.all("SELECT * FROM quizzes", (err, rows) => {
-        const formatted = rows.map(r => ({ ...r, questions: JSON.parse(r.questions || '[]') }));
+        if (err) return res.status(500).json({ error: err.message });
+        const formatted = rows.map(r => ({
+            ...r,
+            questions: JSON.parse(r.questions || '[]'),
+            showResultImmediately: r.showResultImmediately === 1 || r.showResultImmediately === true
+        }));
         res.json(formatted);
     });
 });
 
 app.post('/api/quizzes', (req, res) => {
     const { title, module, timeLimit, questions, showResultImmediately } = req.body;
-    db.run("INSERT INTO quizzes (title, module, timeLimit, questions, showResultImmediately) VALUES (?, ?, ?, ?, ?)", [title, module, timeLimit, JSON.stringify(questions), showResultImmediately], function (err) {
-        res.json({ id: this.lastID, title, module, timeLimit, questions, showResultImmediately });
-    });
+    db.run("INSERT INTO quizzes (title, module, timeLimit, questions, showResultImmediately) VALUES (?, ?, ?, ?, ?)",
+        [title, module, timeLimit, JSON.stringify(questions), showResultImmediately ? 1 : 0],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ id: this.lastID, title, module, timeLimit, questions, showResultImmediately: !!showResultImmediately });
+        }
+    );
 });
 
 app.delete('/api/quizzes/:id', (req, res) => {
@@ -163,9 +172,9 @@ app.get('/api/attempts/:email', (req, res) => {
 
 app.post('/api/attempts', (req, res) => {
     const { quiz_id, student_email, score, showResultImmediately, quiz_title } = req.body;
-    db.run("INSERT INTO attempts (quiz_id, student_email, score) VALUES (?, ?, ?)", [quiz_id, student_email, score], async function(err) {
+    db.run("INSERT INTO attempts (quiz_id, student_email, score) VALUES (?, ?, ?)", [quiz_id, student_email, score], async function (err) {
         if (err) return res.status(500).json({ error: err.message });
-        
+
         // If teacher doesn't want results immediately in UI, we MUST email them (per requirement)
         // Actually, we can email them regardless if we want to be proactive, but requirement says "then the score should be sent to their mails"
         if (!showResultImmediately) {
