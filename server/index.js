@@ -207,32 +207,44 @@ async function scoreWithExternalAI({ model, studentAnswer, answerKey, contextLab
     const timeout = setTimeout(() => controller.abort(), 25000);
 
     try {
-        const response = await fetch(`${EXTERNAL_AI_BASE_URL}/chat/completions`, {
+        const url = `${EXTERNAL_AI_BASE_URL}/models/${model}:generateContent?key=${EXTERNAL_AI_API_KEY}`;
+        console.log('[AI DEBUG] Request URL:', url.replace(EXTERNAL_AI_API_KEY, '***KEY***'));
+        console.log('[AI DEBUG] Base URL:', EXTERNAL_AI_BASE_URL);
+        console.log('[AI DEBUG] Model:', model);
+        
+        const response = await fetch(url, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${EXTERNAL_AI_API_KEY}`
+                'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                model,
-                temperature: 0.1,
-                messages: [
-                    {
-                        role: 'system',
-                        content: 'You are a strict academic evaluator. Return JSON only with keys: score (0-100 number), feedback (short string).'
-                    },
+                system_instruction: {
+                    parts: {
+                        text: 'You are a strict academic evaluator. Return JSON only with keys: score (0-100 number), feedback (short string).'
+                    }
+                },
+                contents: [
                     {
                         role: 'user',
-                        content: [
-                            `Context: ${contextLabel}`,
-                            'Evaluate the student answer against the answer key.',
-                            'Scoring rules: semantic correctness, coverage of key points, accuracy, and clarity.',
-                            'Return only JSON object: {"score": <0-100>, "feedback": "..."}.',
-                            `Answer Key:\n${String(answerKey || '').slice(0, 8000)}`,
-                            `Student Answer:\n${String(studentAnswer || '').slice(0, 8000)}`
-                        ].join('\n\n')
+                        parts: [
+                            {
+                                text: [
+                                    `Context: ${contextLabel}`,
+                                    'Evaluate the student answer against the answer key.',
+                                    'Scoring rules: semantic correctness, coverage of key points, accuracy, and clarity.',
+                                    'Return only JSON object: {"score": <0-100>, "feedback": "..."}.',
+                                    `Answer Key:\n${String(answerKey || '').slice(0, 8000)}`,
+                                    `Student Answer:\n${String(studentAnswer || '').slice(0, 8000)}`
+                                ].join('\n\n')
+                            }
+                        ]
                     }
-                ]
+                ],
+                generationConfig: {
+                    temperature: 0.1,
+                    topK: 40,
+                    topP: 0.95
+                }
             }),
             signal: controller.signal
         });
@@ -243,9 +255,7 @@ async function scoreWithExternalAI({ model, studentAnswer, answerKey, contextLab
         }
 
         const payload = await response.json();
-        const rawContent = Array.isArray(payload?.choices?.[0]?.message?.content)
-            ? payload.choices[0].message.content.map(part => part?.text || '').join('\n')
-            : payload?.choices?.[0]?.message?.content;
+        const rawContent = payload?.candidates?.[0]?.content?.parts?.[0]?.text || '';
         const parsed = parseAiScoreContent(rawContent);
         return {
             score: Number(parsed.score.toFixed(2)),
