@@ -1,29 +1,34 @@
 import { useState, useEffect } from 'react';
 import { Calendar, Bell, ExternalLink, PenTool, BookOpen, ChevronRight, Folder } from 'lucide-react';
+import API_BASE_URL from '../utils/api';
 
-export default function Home({ setActiveTab }) {
+export default function Home({ setActiveTab, role }) {
     const [todos, setTodos] = useState([]);
     const [savedBoards, setSavedBoards] = useState([]);
     const currentUserEmail = localStorage.getItem('eschool_current_user') || 'student@eschool.com';
 
     useEffect(() => {
-        // Fetch Todos for overview
-        fetch(`http://localhost:5000/api/todos/${currentUserEmail}`)
-            .then(res => res.json())
-            .then(data => setTodos(data.slice(0, 3)))
-            .catch(err => console.error(err));
-
-        // Fetch saved whiteboards for list view
-        fetch(`http://localhost:5000/api/saved-whiteboards/${currentUserEmail}`)
-            .then(res => res.json())
-            .then(data => setSavedBoards(data.slice(0, 4))) // Only show 4 most recent
-            .catch(err => console.error(err));
+        Promise.all([
+            fetch(`${API_BASE_URL}/todos/${currentUserEmail}`).then(res => res.json()),
+            fetch(`${API_BASE_URL.replace('/api', '')}/api/saved-whiteboards/${currentUserEmail}`).then(res => res.json())
+        ])
+            .then(([todoData, boardData]) => {
+                setTodos((todoData || []).slice(0, 3));
+                setSavedBoards((boardData || []).slice(0, 4));
+            })
+            .catch(err => console.error('Home load failed:', err));
     }, [currentUserEmail]);
 
     const openBoard = (id) => {
         localStorage.setItem('eschool_pending_board_id', id);
         setActiveTab('whiteboard');
     };
+
+    const learningTabId = role === 'teacher' ? 'quizSettings' : 'education';
+    const learningTitle = role === 'teacher' ? 'Manage Quizzes' : 'Continue Learning';
+    const learningText = role === 'teacher'
+        ? 'Create quizzes, review submissions, and finalize scores.'
+        : 'Resume your curriculum modules and quiz practice.';
 
     return (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '2rem', height: '100%' }}>
@@ -112,10 +117,10 @@ export default function Home({ setActiveTab }) {
                             <BookOpen size={24} />
                         </div>
                         <div>
-                            <h4 style={{ fontSize: '1.1rem', marginBottom: '4px' }}>Continue Learning</h4>
-                            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Resume your curriculum modules where you left off.</p>
+                            <h4 style={{ fontSize: '1.1rem', marginBottom: '4px' }}>{learningTitle}</h4>
+                            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>{learningText}</p>
                         </div>
-                        <button onClick={() => setActiveTab('education')} style={{ marginLeft: 'auto', padding: '10px', borderRadius: '50%', background: 'var(--bg-panel)' }}>
+                        <button onClick={() => setActiveTab(learningTabId)} style={{ marginLeft: 'auto', padding: '10px', borderRadius: '50%', background: 'var(--bg-panel)' }}>
                             <ExternalLink size={18} />
                         </button>
                     </div>

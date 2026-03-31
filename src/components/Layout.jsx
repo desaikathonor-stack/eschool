@@ -14,12 +14,12 @@ export default function Layout({ children, role, activeTab, setActiveTab }) {
             { id: 'notes', icon: <Edit size={20} />, label: 'Notes' },
             { id: 'todo', icon: <CheckSquare size={20} />, label: 'Todo' },
             { id: 'whiteboard', icon: <Edit3 size={20} />, label: 'Whiteboard' },
-            { id: 'assignments', icon: <ClipboardList size={20} />, label: 'Assignments' }
+            { id: 'assignments', icon: <ClipboardList size={20} />, label: 'Assignments / Assessments' }
         ];
         if (role === 'student') {
-            base.push({ id: 'education', icon: <MonitorPlay size={20} />, label: 'Education' });
+            base.push({ id: 'education', icon: <MonitorPlay size={20} />, label: 'Quizzes & Learning' });
         } else {
-            base.push({ id: 'quizSettings', icon: <Settings size={20} />, label: 'Quiz Settings' });
+            base.push({ id: 'quizSettings', icon: <Settings size={20} />, label: 'Quizzes' });
         }
         return base;
     };

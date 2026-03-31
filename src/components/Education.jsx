@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { PlayCircle, CheckCircle, FileText, Award, ArrowRight, ArrowLeft, X } from 'lucide-react';
 import API_BASE_URL from '../utils/api';
+import { calculateKeywordMatchPercentage } from '../utils/scoringUtils';
 
 const MOCK_VIDEOS = [
     { id: 1, module: 'Module 1', title: 'Introduction to Web & HTML', duration: '10:00', youtubeId: '9J1nJOivdyw' },
@@ -32,24 +33,36 @@ export default function Education() {
 
     useEffect(() => {
         loadQuizzes();
+
+        const interval = setInterval(() => {
+            loadQuizzes();
+        }, 15000);
+
+        return () => clearInterval(interval);
     }, []);
 
     const loadQuizzes = () => {
-        fetch(`${API_BASE_URL}/quizzes`)
-            .then(res => res.json())
-            .then(allQuizzes => {
-                fetch(`${API_BASE_URL}/attempts/${currentUserEmail}`)
-                    .then(res => res.json())
-                    .then(attempts => {
-                        const decorated = allQuizzes.map(q => {
-                            const myAttempt = attempts.find(a => a.quiz_id === q.id);
-                            if (myAttempt) {
-                                return { ...q, status: 'completed', score: myAttempt.score };
-                            }
-                            return { ...q, status: 'pending' };
-                        });
-                        setQuizzes(decorated);
-                    });
+        Promise.all([
+            fetch(`${API_BASE_URL}/quizzes`).then(res => res.json()),
+            fetch(`${API_BASE_URL}/attempts/${currentUserEmail}`).then(res => res.json())
+        ])
+            .then(([allQuizzes, attempts]) => {
+                const attemptsByQuizId = new Map((attempts || []).map(attempt => [attempt.quiz_id, attempt]));
+                const decorated = (allQuizzes || []).map(quiz => {
+                    const myAttempt = attemptsByQuizId.get(quiz.id);
+                    if (myAttempt) {
+                        if (myAttempt.evaluationStatus && myAttempt.evaluationStatus !== 'completed') {
+                            return { ...quiz, status: 'submitted', score: 'Pending teacher review' };
+                        }
+                        return { ...quiz, status: 'completed', score: myAttempt.score };
+                    }
+                    return { ...quiz, status: 'pending' };
+                });
+                setQuizzes(decorated);
+            })
+            .catch(error => {
+                console.error('Failed loading quizzes:', error);
+                setQuizzes([]);
             });
     };
 
@@ -62,28 +75,13 @@ export default function Education() {
         setShowResult(false);
     };
 
-    const calculateMatchPercentage = (studentAns, teacherAns) => {
-        if (!studentAns || !teacherAns) return 0;
-        const sWords = studentAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
-        const tWords = teacherAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
-        if (tWords.length === 0) return 0;
-
-        // Count how many teacher answer keywords are present in student answer
-        const sSet = new Set(sWords);
-        let matchCount = 0;
-        tWords.forEach(w => {
-            if (sSet.has(w)) matchCount++;
-        });
-        return (matchCount / tWords.length) * 100;
-    };
-
     const submitQuiz = () => {
         let score = 0;
         const totalMax = activeQuiz.questions.length;
 
         activeQuiz.questions.forEach((q, idx) => {
             if (q.type === 'descriptive') {
-                const matchPct = calculateMatchPercentage(answers[idx], q.answerKey);
+                const matchPct = calculateKeywordMatchPercentage(answers[idx], q.answerKey);
 
                 let targetMatch = 85;
                 if (q.level === 'hard') targetMatch = 75;
@@ -110,7 +108,9 @@ export default function Education() {
                 quiz_title: activeQuiz.title,
                 student_email: currentUserEmail,
                 score: percentage,
-                showResultImmediately: activeQuiz.showResultImmediately
+                showResultImmediately: activeQuiz.showResultImmediately,
+                quiz_type: activeQuiz.quizType || 'objective',
+                responses: answers
             })
         }).then(() => {
             loadQuizzes();
@@ -178,7 +178,9 @@ export default function Education() {
                                 Your answers have been recorded successfully.
                             </p>
                             <p style={{ color: 'var(--primary)', fontSize: '1rem' }}>
-                                Your teacher will review and email your results to you shortly.
+                                {activeQuiz.quizType === 'subjective'
+                                    ? 'This is a subjective quiz. Two AI models evaluate your answers first, then your teacher finalizes marks.'
+                                    : 'Your teacher will review and email your results to you shortly.'}
                             </p>
                         </div>
                     ) : (
@@ -281,6 +283,17 @@ export default function Education() {
                 <p style={{ color: 'var(--text-muted)', fontSize: '1.2rem', marginBottom: '2rem', maxWidth: '600px' }}>
                     This quiz contains {activeQuiz.questions ? activeQuiz.questions.length : 0} questions covering {activeQuiz.module}. You will have {activeQuiz.timeLimit} to complete it.
                 </p>
+                {activeQuiz.questionPaperUrl && (
+                    <a
+                        href={`${API_BASE_URL.replace('/api', '')}${activeQuiz.questionPaperUrl}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="btn-primary"
+                        style={{ marginBottom: '1rem', background: 'var(--glass-bg)', color: 'var(--text-main)', border: '1px solid var(--border-color)', textDecoration: 'none' }}
+                    >
+                        Open Question Paper PDF
+                    </a>
+                )}
                 <div style={{ display: 'flex', gap: '1rem' }}>
                     <button onClick={() => setActiveQuiz(null)} className="btn-primary" style={{ background: 'var(--glass-bg)', color: 'var(--text-main)', border: '1px solid var(--border-color)' }}>Cancel</button>
                     <button disabled={!activeQuiz.questions || activeQuiz.questions.length === 0} onClick={() => setIsStarting(true)} className="btn-primary" style={{ opacity: (!activeQuiz.questions || activeQuiz.questions.length === 0) ? 0.5 : 1 }}>
@@ -371,9 +384,9 @@ export default function Education() {
                         <div key={quiz.id} className="glass-panel" style={{ padding: '2rem', display: 'flex', flexDirection: 'column' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
                                 <div style={{ padding: '4px 12px', borderRadius: '16px', fontSize: '0.8rem', fontWeight: 600, background: quiz.status === 'completed' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(99, 102, 241, 0.2)', color: quiz.status === 'completed' ? '#10b981' : 'var(--primary)' }}>
-                                    {quiz.status === 'completed' ? 'Completed' : 'Pending Action'}
+                                    {quiz.status === 'completed' ? 'Completed' : quiz.status === 'submitted' ? 'Submitted - Pending Evaluation' : 'Pending Action'}
                                 </div>
-                                {quiz.status === 'completed' && <CheckCircle size={20} color="#10b981" />}
+                                {(quiz.status === 'completed' || quiz.status === 'submitted') && <CheckCircle size={20} color={quiz.status === 'completed' ? '#10b981' : '#f59e0b'} />}
                             </div>
 
                             <h3 style={{ fontSize: '1.25rem', marginBottom: '1rem', flex: 1 }}>{quiz.title}</h3>
@@ -383,6 +396,17 @@ export default function Education() {
                                 <span>•</span>
                                 <span>{quiz.timeLimit}</span>
                             </div>
+
+                            {quiz.questionPaperUrl && (
+                                <a
+                                    href={`${API_BASE_URL.replace('/api', '')}${quiz.questionPaperUrl}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ marginBottom: '1rem', color: 'var(--primary)', fontSize: '0.9rem', textDecoration: 'none' }}
+                                >
+                                    View Question Paper PDF
+                                </a>
+                            )}
 
                             {quiz.status === 'completed' ? (
                                 <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -399,6 +423,10 @@ export default function Education() {
                                     <button onClick={() => { setActiveQuiz(quiz); setIsReviewMode(true); }} className="btn-primary" style={{ width: '100%', background: 'var(--glass-bg)', color: 'var(--text-main)', border: '1px solid var(--border-color)' }}>
                                         Review Quiz Content
                                     </button>
+                                </div>
+                            ) : quiz.status === 'submitted' ? (
+                                <div style={{ padding: '12px', borderRadius: '8px', background: 'rgba(245, 158, 11, 0.12)', border: '1px solid rgba(245, 158, 11, 0.3)', color: '#f59e0b', fontSize: '0.92rem' }}>
+                                    Submitted successfully. Awaiting teacher-approved final marks.
                                 </div>
                             ) : (
                                 <button onClick={() => startQuiz(quiz)} className="btn-primary" style={{ width: '100%' }}>View Quiz Details</button>

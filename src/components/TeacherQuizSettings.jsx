@@ -1,15 +1,14 @@
 import { useState, useEffect } from 'react';
-import { Plus, Save, Trash2, Globe, Mail } from 'lucide-react';
+import { Plus, Save, Trash2, Globe, Mail, FileUp, FileText } from 'lucide-react';
 import API_BASE_URL from '../utils/api';
-import mammoth from 'mammoth';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+import { extractTextFromFile } from '../utils/documentUtils';
 
 export default function TeacherQuizSettings() {
     const [quizzes, setQuizzes] = useState([]);
     const [isCreating, setIsCreating] = useState(false);
+    const [quizMode, setQuizMode] = useState('objective');
     const [newQuiz, setNewQuiz] = useState({ title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, generalAnswerKeyFile: null });
+    const [questionPaperFile, setQuestionPaperFile] = useState(null);
 
     const [questionsData, setQuestionsData] = useState(
         Array.from({ length: 5 }, () => ({
@@ -24,38 +23,14 @@ export default function TeacherQuizSettings() {
     );
 
     const [attempts, setAttempts] = useState([]);
+    const [evaluatingAttemptId, setEvaluatingAttemptId] = useState(null);
+    const [evaluationByAttempt, setEvaluationByAttempt] = useState({});
+    const [finalScoreByAttempt, setFinalScoreByAttempt] = useState({});
 
     useEffect(() => {
         fetchQuizzes();
         fetchAttempts();
     }, []);
-
-    const extractTextFromFile = async (file) => {
-        if (!file) return '';
-        try {
-            if (file.name.endsWith('.docx')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const result = await mammoth.extractRawText({ arrayBuffer });
-                return result.value.trim();
-            } else if (file.name.endsWith('.pdf')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-                let text = '';
-                for (let i = 1; i <= pdf.numPages; i++) {
-                    const page = await pdf.getPage(i);
-                    const content = await page.getTextContent();
-                    text += content.items.map(item => item.str).join(' ') + ' ';
-                }
-                return text.trim();
-            } else {
-                const text = await file.text();
-                return text.trim();
-            }
-        } catch (err) {
-            console.error("Extraction error", err);
-            return '';
-        }
-    };
 
     const handleGeneralFileChange = async (e) => {
         const file = e.target.files[0];
@@ -100,13 +75,35 @@ export default function TeacherQuizSettings() {
             const newData = [...prev];
             if (count > prev.length) {
                 for (let i = prev.length; i < count; i++) {
-                    newData.push({ q: '', type: 'mcq', level: 'medium', options: ['', '', '', ''], correct: 0, answerKey: '', answerKeyFile: null });
+                    newData.push({
+                        q: '',
+                        type: quizMode === 'subjective' ? 'descriptive' : 'mcq',
+                        level: 'medium',
+                        options: ['', '', '', ''],
+                        correct: 0,
+                        answerKey: '',
+                        answerKeyFile: null
+                    });
                 }
             } else if (count < prev.length) {
                 newData.length = count;
             }
             return newData;
         });
+    };
+
+    const handleModeChange = (mode) => {
+        const normalizedMode = mode === 'subjective' ? 'subjective' : 'objective';
+        setQuizMode(normalizedMode);
+        setNewQuiz(prev => ({
+            ...prev,
+            showResultImmediately: normalizedMode === 'subjective' ? false : prev.showResultImmediately
+        }));
+
+        setQuestionsData(prev => prev.map(question => ({
+            ...question,
+            type: normalizedMode === 'subjective' ? 'descriptive' : 'mcq'
+        })));
     };
 
     const updateQuestionPrompt = (index, value) => {
@@ -133,7 +130,7 @@ export default function TeacherQuizSettings() {
         setQuestionsData(newData);
     };
 
-    const handleCreate = (e) => {
+    const handleCreate = async (e) => {
         e.preventDefault();
 
         // Validation
@@ -143,63 +140,149 @@ export default function TeacherQuizSettings() {
                 alert(`Please enter a prompt for Question ${i + 1}.`);
                 return;
             }
-            if (qData.type === 'mcq' && qData.options.some(o => !o.trim())) {
+
+            if (quizMode === 'objective' && qData.options.some(o => !o.trim())) {
                 alert(`Please complete all options in Question ${i + 1} before publishing.`);
                 return;
             }
-            if (qData.type === 'descriptive' && !newQuiz.generalAnswerKeyFile && !qData.answerKey.trim() && !qData.answerKeyFile) {
+
+            if (quizMode === 'subjective' && !qData.answerKey.trim() && !qData.answerKeyFile && !newQuiz.generalAnswerKeyFile) {
                 alert(`Please complete the descriptive answer key for Question ${i + 1} or upload a file.`);
                 return;
             }
         }
 
+        const normalizedQuestions = questionsData.map((question) => {
+            if (quizMode === 'objective') {
+                return {
+                    ...question,
+                    type: 'mcq',
+                    answerKey: '',
+                    answerKeyFile: null
+                };
+            }
+
+            return {
+                ...question,
+                type: 'descriptive',
+                correct: 0,
+                options: ['', '', '', '']
+            };
+        });
+
         const created = {
             title: newQuiz.title,
             module: newQuiz.module,
             timeLimit: newQuiz.timeLimit,
-            questions: questionsData,
-            showResultImmediately: newQuiz.showResultImmediately
+            quizType: quizMode,
+            questions: normalizedQuestions,
+            showResultImmediately: quizMode === 'subjective' ? false : newQuiz.showResultImmediately
         };
 
-        fetch(`${API_BASE_URL}/quizzes`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(created)
-        })
-            .then(res => {
-                if (!res.ok) throw new Error(`Server error: ${res.status}`);
-                return res.json();
-            })
-            .then(data => {
-                if (data.error) throw new Error(data.error);
-                setQuizzes([...quizzes, data]);
-                setIsCreating(false);
-                setNewQuiz({ title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, generalAnswerKeyFile: null });
-                setQuestionsData(Array.from({ length: 5 }, () => ({
-                    q: '',
-                    type: 'mcq',
-                    level: 'medium',
-                    options: ['', '', '', ''],
-                    correct: 0,
-                    answerKey: '',
-                    answerKeyFile: null
-                })));
-                alert('Quiz published successfully!');
-            })
-            .catch(err => {
-                console.error('Failed to publish quiz:', err);
-                alert('Failed to publish quiz: ' + err.message);
+        if (questionPaperFile && !questionPaperFile.name.toLowerCase().endsWith('.pdf')) {
+            alert('Question paper must be a PDF file.');
+            return;
+        }
+
+        if (questionPaperFile && questionPaperFile.size > 20 * 1024 * 1024) {
+            alert('Question paper must be under 20MB.');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('title', created.title);
+        formData.append('module', created.module);
+        formData.append('timeLimit', created.timeLimit);
+        formData.append('quizType', created.quizType);
+        formData.append('questions', JSON.stringify(created.questions));
+        formData.append('showResultImmediately', String(created.showResultImmediately));
+        if (questionPaperFile) {
+            formData.append('questionPaper', questionPaperFile);
+        }
+
+        try {
+            const res = await fetch(`${API_BASE_URL}/quizzes`, {
+                method: 'POST',
+                body: formData
             });
+            if (!res.ok) throw new Error(`Server error: ${res.status}`);
+
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            setQuizzes(prev => [data, ...prev]);
+            setIsCreating(false);
+            setQuizMode('objective');
+            setQuestionPaperFile(null);
+            setNewQuiz({ title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, generalAnswerKeyFile: null });
+            setQuestionsData(Array.from({ length: 5 }, () => ({
+                q: '',
+                type: 'mcq',
+                level: 'medium',
+                options: ['', '', '', ''],
+                correct: 0,
+                answerKey: '',
+                answerKeyFile: null
+            })));
+            alert('Quiz published successfully!');
+        } catch (err) {
+            console.error('Failed to publish quiz:', err);
+            alert('Failed to publish quiz: ' + err.message);
+        }
     };
 
     const unpublish = (id) => {
         fetch(`${API_BASE_URL}/quizzes/${id}`, { method: 'DELETE' })
-            .then(() => setQuizzes(quizzes.filter(q => q.id !== id)));
+            .then(() => setQuizzes(prev => prev.filter(q => q.id !== id)));
     };
 
     const handleSendMail = (attempt) => {
         const mailtoLink = `mailto:${attempt.student_email}?subject=Your Quiz Result&body=Hello,\n\nYou have taken the quiz "${attempt.quiz_title}" and scored: ${attempt.score}.\n\nBest Regards,\nTeacher`;
         window.location.href = mailtoLink;
+    };
+
+    const handleEvaluateAttempt = async (attemptId) => {
+        try {
+            setEvaluatingAttemptId(attemptId);
+            const response = await fetch(`${API_BASE_URL}/attempts/${attemptId}/evaluate-ai`, { method: 'POST' });
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'AI evaluation failed.');
+            }
+
+            setEvaluationByAttempt(prev => ({ ...prev, [attemptId]: data }));
+            setFinalScoreByAttempt(prev => ({ ...prev, [attemptId]: String(Math.round(data.recommendedScore)) }));
+            fetchAttempts();
+        } catch (error) {
+            alert(error.message || 'Failed to run AI evaluation.');
+        } finally {
+            setEvaluatingAttemptId(null);
+        }
+    };
+
+    const handleFinalizeScore = async (attemptId) => {
+        const value = Number(finalScoreByAttempt[attemptId]);
+        if (!Number.isFinite(value)) {
+            alert('Please enter a valid score between 0 and 100.');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE_URL}/attempts/${attemptId}/finalize-score`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ finalScore: value })
+            });
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Failed to finalize score.');
+            }
+
+            fetchAttempts();
+            alert('Final score saved and visible to student.');
+        } catch (error) {
+            alert(error.message || 'Failed to save score.');
+        }
     };
 
     return (
@@ -247,6 +330,62 @@ export default function TeacherQuizSettings() {
                             </div>
                         </div>
 
+                        <div style={{ display: 'flex', gap: '0.75rem' }}>
+                            <button
+                                type="button"
+                                onClick={() => handleModeChange('objective')}
+                                style={{
+                                    flex: 1,
+                                    padding: '10px 14px',
+                                    borderRadius: '10px',
+                                    border: quizMode === 'objective' ? '1px solid var(--primary)' : '1px solid var(--border-color)',
+                                    background: quizMode === 'objective' ? 'rgba(99, 102, 241, 0.16)' : 'var(--bg-dark)',
+                                    color: 'var(--text-main)'
+                                }}
+                            >
+                                Objective Quiz
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => handleModeChange('subjective')}
+                                style={{
+                                    flex: 1,
+                                    padding: '10px 14px',
+                                    borderRadius: '10px',
+                                    border: quizMode === 'subjective' ? '1px solid var(--primary)' : '1px solid var(--border-color)',
+                                    background: quizMode === 'subjective' ? 'rgba(99, 102, 241, 0.16)' : 'var(--bg-dark)',
+                                    color: 'var(--text-main)'
+                                }}
+                            >
+                                Subjective Quiz
+                            </button>
+                        </div>
+
+                        <div>
+                            <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Upload Question Paper (PDF, optional)</label>
+                            <div style={{ position: 'relative', width: '100%' }}>
+                                <input type="file" accept=".pdf,application/pdf" onChange={e => setQuestionPaperFile(e.target.files?.[0] || null)} style={{ display: 'none' }} id="quizQuestionPaperInput" />
+                                <label htmlFor="quizQuestionPaperInput" className="input-base" style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', background: 'var(--bg-dark)' }}>
+                                    <FileUp size={18} color="var(--primary)" />
+                                    {questionPaperFile ? questionPaperFile.name : 'Choose PDF question paper...'}
+                                </label>
+                                {questionPaperFile && (
+                                    <button
+                                        type="button"
+                                        onClick={(event) => {
+                                            event.preventDefault();
+                                            setQuestionPaperFile(null);
+                                            const input = document.getElementById('quizQuestionPaperInput');
+                                            if (input) input.value = '';
+                                        }}
+                                        style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', color: '#ef4444', padding: '4px' }}
+                                    >
+                                        <Trash2 size={14} />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+
                         <div style={{ padding: '1rem', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '20px' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
                                 <input
@@ -254,16 +393,19 @@ export default function TeacherQuizSettings() {
                                     id="showResultOption"
                                     checked={newQuiz.showResultImmediately}
                                     onChange={e => setNewQuiz({ ...newQuiz, showResultImmediately: e.target.checked })}
+                                    disabled={quizMode === 'subjective'}
                                     style={{ width: '18px', height: '18px', cursor: 'pointer' }}
                                 />
                                 <label htmlFor="showResultOption" style={{ cursor: 'pointer', color: 'var(--text-main)', fontSize: '0.95rem' }}>
-                                    Show result to student immediately after completing.
+                                    {quizMode === 'subjective'
+                                        ? 'Disabled for subjective quizzes. Teacher finalizes marks after AI evaluation.'
+                                        : 'Show result to student immediately after completing.'}
                                 </label>
                             </div>
-                            <div style={{ flex: 1, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '20px', minWidth: '300px' }}>
+                            <div style={{ flex: 1, borderLeft: '1px solid rgba(255,255,255,0.1)', paddingLeft: '20px', minWidth: '300px', opacity: quizMode === 'subjective' ? 1 : 0.5 }}>
                                 <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Upload General Answer Key (Docx/PDF)</label>
-                                <input type="file" accept=".pdf,.docx" onChange={handleGeneralFileChange} className="input-base" style={{ padding: '6px', fontSize: '0.85rem' }} />
-                                <p style={{ fontSize: '0.75rem', marginTop: '4px', color: 'var(--text-muted)' }}>*Optional: Attach key as a whole document. This will format questions and auto-disable question-by-question keys.</p>
+                                <input type="file" accept=".pdf,.docx" onChange={handleGeneralFileChange} className="input-base" style={{ padding: '6px', fontSize: '0.85rem' }} disabled={quizMode !== 'subjective'} />
+                                <p style={{ fontSize: '0.75rem', marginTop: '4px', color: 'var(--text-muted)' }}>*Optional: Attach a general key document. You can still edit per-question answer keys below.</p>
                             </div>
                         </div>
                     </div>
@@ -276,10 +418,9 @@ export default function TeacherQuizSettings() {
                                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                                     <h5 style={{ color: 'var(--primary)' }}>Question {index + 1}</h5>
                                     <div style={{ display: 'flex', gap: '1rem' }}>
-                                        <select value={qData.type} onChange={e => updateQuestionField(index, 'type', e.target.value)} className="input-base" style={{ padding: '4px 8px', width: 'auto' }}>
-                                            <option value="mcq">Multiple Choice</option>
-                                            <option value="descriptive">Descriptive</option>
-                                        </select>
+                                        <span className="input-base" style={{ padding: '6px 10px', width: 'auto', fontSize: '0.85rem', background: 'var(--bg-dark)' }}>
+                                            {quizMode === 'objective' ? 'Objective (MCQ)' : 'Subjective (Descriptive)'}
+                                        </span>
                                         <select value={qData.level} onChange={e => updateQuestionField(index, 'level', e.target.value)} className="input-base" style={{ padding: '4px 8px', width: 'auto' }}>
                                             <option value="easy">Easy</option>
                                             <option value="medium">Medium</option>
@@ -289,7 +430,7 @@ export default function TeacherQuizSettings() {
                                 </div>
                                 <input type="text" required value={qData.q} onChange={e => updateQuestionPrompt(index, e.target.value)} className="input-base" placeholder="Enter Question Prompt" style={{ marginBottom: '1rem' }} />
 
-                                {qData.type === 'mcq' ? (
+                                {quizMode === 'objective' ? (
                                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
                                         {qData.options.map((opt, optIdx) => (
                                             <div key={optIdx} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '10px', background: qData.correct === optIdx ? 'rgba(16, 185, 129, 0.1)' : 'var(--bg-dark)', borderRadius: '8px', border: qData.correct === optIdx ? '1px solid #10b981' : '1px solid transparent', transition: 'all 0.2s' }}>
@@ -306,14 +447,12 @@ export default function TeacherQuizSettings() {
                                 ) : (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                         <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Descriptive Answer Key (used for % matching):</label>
-                                        <textarea disabled={!!newQuiz.generalAnswerKeyFile} required={!newQuiz.generalAnswerKeyFile && !qData.answerKeyFile} value={qData.answerKey} onChange={e => updateQuestionField(index, 'answerKey', e.target.value)} className="input-base" placeholder={!!newQuiz.generalAnswerKeyFile ? "Disabled since a general answer key is uploaded." : "Enter keywords or the ideal answer used evaluating the student's submission."} style={{ resize: 'vertical', minHeight: '60px', opacity: !!newQuiz.generalAnswerKeyFile ? 0.5 : 1 }} />
+                                        <textarea required={!qData.answerKeyFile && !newQuiz.generalAnswerKeyFile} value={qData.answerKey} onChange={e => updateQuestionField(index, 'answerKey', e.target.value)} className="input-base" placeholder="Enter keywords or the ideal answer used for evaluating the student's submission." style={{ resize: 'vertical', minHeight: '60px' }} />
 
-                                        {!newQuiz.generalAnswerKeyFile && (
-                                            <div style={{ marginTop: '0.5rem' }}>
-                                                <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px', display: 'block' }}>Or add a file as Answer Key for this specific question:</label>
-                                                <input type="file" onChange={e => handleQuestionFileUpload(index, e.target.files[0])} className="input-base" style={{ padding: '4px', fontSize: '0.8rem' }} />
-                                            </div>
-                                        )}
+                                        <div style={{ marginTop: '0.5rem' }}>
+                                            <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px', display: 'block' }}>Or add a file as answer key for this specific question:</label>
+                                            <input type="file" onChange={e => handleQuestionFileUpload(index, e.target.files[0])} className="input-base" style={{ padding: '4px', fontSize: '0.8rem' }} />
+                                        </div>
                                     </div>
                                 )}
                             </div>
@@ -337,6 +476,12 @@ export default function TeacherQuizSettings() {
                             </div>
                             <h4 style={{ fontSize: '1.2rem' }}>{quiz.title}</h4>
                             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{quiz.questions ? quiz.questions.length : 0} Questions prepared for students.</p>
+                            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>Mode: {quiz.quizType === 'subjective' ? 'Subjective' : 'Objective'}</p>
+                            {quiz.questionPaperName && (
+                                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <FileText size={14} color="var(--primary)" /> Question Paper: {quiz.questionPaperName}
+                                </p>
+                            )}
 
                             <div style={{ display: 'flex', gap: '1rem', marginTop: 'auto', paddingTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                                 <button onClick={() => unpublish(quiz.id)} style={{ flex: 1, padding: '8px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
@@ -360,6 +505,7 @@ export default function TeacherQuizSettings() {
                                 <th style={{ padding: '15px' }}>Quiz Title</th>
                                 <th style={{ padding: '15px' }}>Module</th>
                                 <th style={{ padding: '15px' }}>Score</th>
+                                <th style={{ padding: '15px' }}>Eval Status</th>
                                 <th style={{ padding: '15px' }}>Actions</th>
                             </tr>
                         </thead>
@@ -374,16 +520,55 @@ export default function TeacherQuizSettings() {
                                             {attempt.score}
                                         </span>
                                     </td>
+                                    <td style={{ padding: '15px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>{attempt.evaluationStatus || 'completed'}</td>
                                     <td style={{ padding: '15px' }}>
-                                        <button onClick={() => handleSendMail(attempt)} style={{ background: 'transparent', color: 'var(--primary)', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                            <Mail size={16} /> Email Marks
-                                        </button>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                            {attempt.quizType === 'subjective' && attempt.evaluationStatus !== 'completed' && (
+                                                <>
+                                                    <button
+                                                        onClick={() => handleEvaluateAttempt(attempt.id)}
+                                                        disabled={evaluatingAttemptId === attempt.id}
+                                                        style={{ background: 'transparent', color: 'var(--primary)', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                                                    >
+                                                        {evaluatingAttemptId === attempt.id ? 'Evaluating...' : 'Run AI Evaluation (2 models)'}
+                                                    </button>
+
+                                                    {evaluationByAttempt[attempt.id] && (
+                                                        <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                            <span>Model 1: {evaluationByAttempt[attempt.id].model1Score}%</span>
+                                                            <span>Model 2: {evaluationByAttempt[attempt.id].model2Score}%</span>
+                                                            <span>Recommended: {evaluationByAttempt[attempt.id].recommendedScore}%</span>
+                                                        </div>
+                                                    )}
+
+                                                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                                        <input
+                                                            type="number"
+                                                            min="0"
+                                                            max="100"
+                                                            placeholder="Final %"
+                                                            className="input-base"
+                                                            style={{ padding: '6px 8px', width: '92px' }}
+                                                            value={finalScoreByAttempt[attempt.id] || ''}
+                                                            onChange={event => setFinalScoreByAttempt(prev => ({ ...prev, [attempt.id]: event.target.value }))}
+                                                        />
+                                                        <button onClick={() => handleFinalizeScore(attempt.id)} className="btn-primary" style={{ padding: '6px 10px', fontSize: '0.8rem' }}>
+                                                            Finalize
+                                                        </button>
+                                                    </div>
+                                                </>
+                                            )}
+
+                                            <button onClick={() => handleSendMail(attempt)} style={{ background: 'transparent', color: 'var(--primary)', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                <Mail size={16} /> Email Marks
+                                            </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
                             {attempts.length === 0 && (
                                 <tr>
-                                    <td colSpan="5" style={{ padding: '30px', textAlign: 'center', color: 'var(--text-muted)' }}>No quiz submissions found yet.</td>
+                                    <td colSpan="6" style={{ padding: '30px', textAlign: 'center', color: 'var(--text-muted)' }}>No quiz submissions found yet.</td>
                                 </tr>
                             )}
                         </tbody>

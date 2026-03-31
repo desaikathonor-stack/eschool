@@ -1,6 +1,7 @@
 import { useRef, useState, useEffect } from 'react';
 import { Pen, Eraser, Trash2, Download, Move, ChevronLeft, ChevronRight, Plus, Save, FolderOpen, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { jsPDF } from 'jspdf';
+import API_BASE_URL from '../utils/api';
 
 export default function Whiteboard() {
     const canvasContainerRef = useRef(null);
@@ -32,6 +33,17 @@ export default function Whiteboard() {
 
     // Current Drawing Line
     const currentLineRef = useRef(null);
+    const redrawScheduledRef = useRef(false);
+    const autoSaveTimerRef = useRef(null);
+
+    const scheduleRedraw = () => {
+        if (redrawScheduledRef.current) return;
+        redrawScheduledRef.current = true;
+        requestAnimationFrame(() => {
+            redrawScheduledRef.current = false;
+            redraw();
+        });
+    };
 
     // --- 1. Load Last Auto-Save or Pending Board ---
     useEffect(() => {
@@ -39,7 +51,7 @@ export default function Whiteboard() {
 
         if (pendingId) {
             // Load specific board from gallery
-            fetch(`http://localhost:5000/api/saved-whiteboards/board/${pendingId}`)
+            fetch(`${API_BASE_URL.replace('/api', '')}/api/saved-whiteboards/board/${pendingId}`)
                 .then(res => res.json())
                 .then(data => {
                     try {
@@ -51,7 +63,7 @@ export default function Whiteboard() {
                 });
         } else {
             // Default: Load last auto-save
-            fetch(`http://localhost:5000/api/whiteboards/${currentUserEmail}`)
+            fetch(`${API_BASE_URL.replace('/api', '')}/api/whiteboards/${currentUserEmail}`)
                 .then(res => res.json())
                 .then(data => {
                     try {
@@ -80,7 +92,7 @@ export default function Whiteboard() {
             context.lineJoin = 'round';
             contextRef.current = context;
 
-            redraw();
+            scheduleRedraw();
         };
 
         window.addEventListener('resize', resizeCanvas);
@@ -112,21 +124,35 @@ export default function Whiteboard() {
 
     // Redraw on Pan/Scale/Slide Changes
     useEffect(() => {
-        redraw();
+        scheduleRedraw();
     }, [pan, scale, currentSlide, slides]);
+
+    useEffect(() => {
+        return () => {
+            if (autoSaveTimerRef.current) {
+                clearTimeout(autoSaveTimerRef.current);
+            }
+        };
+    }, []);
 
     // Auto-save Background State
     const saveAutoState = (slidesData) => {
-        fetch('http://localhost:5000/api/whiteboards', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: currentUserEmail, slides_data: JSON.stringify(slidesData) })
-        }).catch(err => console.error(err));
+        if (autoSaveTimerRef.current) {
+            clearTimeout(autoSaveTimerRef.current);
+        }
+
+        autoSaveTimerRef.current = setTimeout(() => {
+            fetch(`${API_BASE_URL.replace('/api', '')}/api/whiteboards`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: currentUserEmail, slides_data: JSON.stringify(slidesData) })
+            }).catch(err => console.error(err));
+        }, 450);
     };
 
     // --- Gallery Functions ---
     const fetchGallery = () => {
-        fetch(`http://localhost:5000/api/saved-whiteboards/${currentUserEmail}`)
+        fetch(`${API_BASE_URL.replace('/api', '')}/api/saved-whiteboards/${currentUserEmail}`)
             .then(res => res.json())
             .then(data => {
                 setSavedBoards(data);
@@ -138,7 +164,7 @@ export default function Whiteboard() {
         const title = prompt("Enter a name for this Whiteboard:", "My Lesson");
         if (!title) return;
 
-        fetch('http://localhost:5000/api/saved-whiteboards', {
+        fetch(`${API_BASE_URL.replace('/api', '')}/api/saved-whiteboards`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: currentUserEmail, title, slides_data: JSON.stringify(slides) })
@@ -154,7 +180,7 @@ export default function Whiteboard() {
     };
 
     const loadGalleryBoard = (id, title) => {
-        fetch(`http://localhost:5000/api/saved-whiteboards/board/${id}`)
+        fetch(`${API_BASE_URL.replace('/api', '')}/api/saved-whiteboards/board/${id}`)
             .then(res => res.json())
             .then(data => {
                 try {
@@ -170,7 +196,7 @@ export default function Whiteboard() {
     };
 
     const deleteGalleryBoard = (id) => {
-        fetch(`http://localhost:5000/api/saved-whiteboards/${id}`, { method: 'DELETE' })
+        fetch(`${API_BASE_URL.replace('/api', '')}/api/saved-whiteboards/${id}`, { method: 'DELETE' })
             .then(() => {
                 setSavedBoards(prev => prev.filter(b => b.id !== id));
                 if (currentBoardId === id) {
@@ -219,8 +245,15 @@ export default function Whiteboard() {
         const offsetX = startX - (startX % gridSize);
         const offsetY = startY - (startY % gridSize);
 
-        for (let x = offsetX - gridSize; x < endX + gridSize; x += gridSize) {
-            for (let y = offsetY - gridSize; y < endY + gridSize; y += gridSize) {
+        const projectedCols = Math.ceil((endX - startX) / gridSize) + 2;
+        const projectedRows = Math.ceil((endY - startY) / gridSize) + 2;
+        const maxPoints = 6000;
+        const pointCount = Math.max(1, projectedCols * projectedRows);
+        const densityStep = pointCount > maxPoints ? Math.ceil(Math.sqrt(pointCount / maxPoints)) : 1;
+        const step = gridSize * densityStep;
+
+        for (let x = offsetX - step; x < endX + step; x += step) {
+            for (let y = offsetY - step; y < endY + step; y += step) {
                 ctx.beginPath();
                 ctx.arc(x, y, 1.5 / scaleState, 0, Math.PI * 2);
                 ctx.fill();
@@ -265,7 +298,7 @@ export default function Whiteboard() {
             size: lineWidth,
             points: [{ x: logicalX, y: logicalY }]
         };
-        redraw();
+        scheduleRedraw();
     };
 
     const handleMouseMove = (e) => {
@@ -285,7 +318,7 @@ export default function Whiteboard() {
         const logicalY = (offsetY - pan.y) / scale;
 
         currentLineRef.current.points.push({ x: logicalX, y: logicalY });
-        redraw(); // Immediate feedback
+        scheduleRedraw();
     };
 
     const handleMouseUp = () => {

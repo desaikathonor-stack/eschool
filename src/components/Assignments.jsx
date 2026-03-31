@@ -1,10 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Plus, Save, Upload, Download, FileText, CheckCircle, Clock, Users, X, AlertCircle, Trash2, CheckSquare, TrendingUp } from 'lucide-react';
 import API_BASE_URL from '../utils/api';
-import mammoth from 'mammoth';
-import * as pdfjsLib from 'pdfjs-dist';
-
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+import { extractTextFromFile, isPdfOrDocx } from '../utils/documentUtils';
+import { calculateKeywordMatchPercentage } from '../utils/scoringUtils';
 
 export default function Assignments({ role }) {
     const [assignments, setAssignments] = useState([]);
@@ -14,10 +12,16 @@ export default function Assignments({ role }) {
     const [newTitle, setNewTitle] = useState('');
     const [newDesc, setNewDesc] = useState('');
     const [newDueDate, setNewDueDate] = useState('');
-    const [newDifficulty, setNewDifficulty] = useState('medium');
     const [teacherFile, setTeacherFile] = useState(null);
     const [answerKeyFile, setAnswerKeyFile] = useState(null);
     const [evaluatingSub, setEvaluatingSub] = useState(null);
+    const [savingSettingsId, setSavingSettingsId] = useState(null);
+    const [evaluatingAssignmentId, setEvaluatingAssignmentId] = useState(null);
+
+    const [difficultySettings, setDifficultySettings] = useState({});
+    const [targetSettings, setTargetSettings] = useState({});
+    const [answerKeyDraft, setAnswerKeyDraft] = useState({});
+    const [answerKeyUpload, setAnswerKeyUpload] = useState({});
 
     // Student Upload State
     const [activeAssignmentId, setActiveAssignmentId] = useState(null);
@@ -28,6 +32,7 @@ export default function Assignments({ role }) {
     const [curveSettings, setCurveSettings] = useState({});
 
     const currentUserEmail = localStorage.getItem('eschool_current_user') || 'anonymous_student';
+    const apiBaseOrigin = API_BASE_URL.replace('/api', '');
 
     useEffect(() => {
         fetchAssignments();
@@ -36,49 +41,37 @@ export default function Assignments({ role }) {
     const fetchAssignments = () => {
         fetch(`${API_BASE_URL}/assignments`)
             .then(res => res.json())
-            .then(data => setAssignments(data))
+            .then(data => {
+                setAssignments(data);
+                setDifficultySettings(prev => {
+                    const next = { ...prev };
+                    data.forEach((assignment) => {
+                        if (!next[assignment.id]) {
+                            next[assignment.id] = assignment.difficulty || 'easy';
+                        }
+                    });
+                    return next;
+                });
+                setTargetSettings(prev => {
+                    const next = { ...prev };
+                    data.forEach((assignment) => {
+                        if (!next[assignment.id] && assignment.targetMatch) {
+                            next[assignment.id] = String(assignment.targetMatch);
+                        }
+                    });
+                    return next;
+                });
+                setAnswerKeyDraft(prev => {
+                    const next = { ...prev };
+                    data.forEach((assignment) => {
+                        if (!next[assignment.id] && assignment.answerKeyText) {
+                            next[assignment.id] = assignment.answerKeyText;
+                        }
+                    });
+                    return next;
+                });
+            })
             .catch(err => console.error("Fetch assignments error:", err));
-    };
-
-    const extractTextFromFile = async (file) => {
-        if (!file) return '';
-        try {
-            if (file.name.endsWith('.docx')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const result = await mammoth.extractRawText({ arrayBuffer });
-                return result.value.trim();
-            } else if (file.name.endsWith('.pdf')) {
-                const arrayBuffer = await file.arrayBuffer();
-                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-                let text = '';
-                for (let i = 1; i <= pdf.numPages; i++) {
-                    const page = await pdf.getPage(i);
-                    const content = await page.getTextContent();
-                    text += content.items.map(item => item.str).join(' ') + ' ';
-                }
-                return text.trim();
-            } else {
-                const text = await file.text();
-                return text.trim();
-            }
-        } catch (err) {
-            console.error("Extraction error", err);
-            return '';
-        }
-    };
-
-    const calculateMatchPercentage = (studentAns, teacherAns) => {
-        if (!studentAns || !teacherAns) return 0;
-        const sWords = studentAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
-        const tWords = teacherAns.toLowerCase().replace(/[^\w\s]/g, '').split(/\s+/).filter(w => w);
-        if (tWords.length === 0) return 0;
-
-        const sSet = new Set(sWords);
-        let matchCount = 0;
-        tWords.forEach(w => {
-            if (sSet.has(w)) matchCount++;
-        });
-        return (matchCount / tWords.length) * 100;
     };
 
     // --- TEACHER ACTIONS ---
@@ -90,42 +83,49 @@ export default function Assignments({ role }) {
 
     const handleCreateAssignment = async (e) => {
         e.preventDefault();
-        if (!newTitle || !newDueDate) return;
+        if (!newTitle.trim()) return;
 
         let answerKeyText = '';
         if (answerKeyFile) {
             answerKeyText = await extractTextFromFile(answerKeyFile);
         }
 
-        const newAssignment = {
-            title: newTitle,
-            description: newDesc,
-            dueDate: newDueDate,
-            difficulty: newDifficulty,
-            fileName: teacherFile ? teacherFile.name : null,
-            answerKeyText: answerKeyText
-        };
+        const formData = new FormData();
+        formData.append('title', newTitle.trim());
+        formData.append('description', newDesc.trim());
+        formData.append('dueDate', newDueDate || '');
+        formData.append('answerKeyText', answerKeyText || '');
+
+        if (teacherFile) {
+            formData.append('questionPaper', teacherFile);
+        }
+        if (answerKeyFile) {
+            formData.append('answerKey', answerKeyFile);
+        }
 
         fetch(`${API_BASE_URL}/assignments`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(newAssignment)
+            body: formData
         })
             .then(res => res.json())
             .then(data => {
-                setAssignments([data, ...assignments]);
+                if (data.error) throw new Error(data.error);
+                setAssignments(prev => [data, ...prev]);
                 setIsCreating(false);
                 setNewTitle('');
                 setNewDesc('');
                 setNewDueDate('');
                 setTeacherFile(null);
                 setAnswerKeyFile(null);
+            })
+            .catch(error => {
+                alert(error.message || 'Failed to create assignment.');
             });
     };
 
     const deleteAssignment = (id) => {
         fetch(`${API_BASE_URL}/assignments/${id}`, { method: 'DELETE' })
-            .then(() => setAssignments(assignments.filter(a => a.id !== id)));
+            .then(() => setAssignments(prev => prev.filter(a => a.id !== id)));
     };
 
     // --- STUDENT ACTIONS ---
@@ -133,8 +133,7 @@ export default function Assignments({ role }) {
         setUploadError('');
         if (e.target.files && e.target.files[0]) {
             const file = e.target.files[0];
-            const ext = file.name.split('.').pop().toLowerCase();
-            const isValidExt = ext === 'pdf' || ext === 'docx';
+            const isValidExt = isPdfOrDocx(file.name);
             const isUnder40MB = file.size <= 40 * 1024 * 1024;
 
             if (!isValidExt) {
@@ -162,29 +161,32 @@ export default function Assignments({ role }) {
         if (!assignment) return;
 
         const now = new Date();
-        const due = new Date(assignment.dueDate);
-        const isLate = now > due;
+        const due = assignment.dueDate ? new Date(assignment.dueDate) : null;
+        const hasDueDate = due && !Number.isNaN(due.getTime());
+        const isLate = hasDueDate ? now > due : false;
         const status = isLate ? 'Late Submitted' : 'Submitted in time';
 
         const extractedText = await extractTextFromFile(studentFile);
 
-        const newSubmission = {
-            studentEmail: currentUserEmail,
-            fileName: studentFile.name,
-            submittedAt: now.toISOString(),
-            status: status,
-            submissionText: extractedText
-        };
+        const formData = new FormData();
+        formData.append('studentEmail', currentUserEmail);
+        formData.append('status', status);
+        formData.append('submissionText', extractedText);
+        formData.append('submissionFile', studentFile);
 
         fetch(`${API_BASE_URL}/assignments/${assignmentId}/submit`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ submission: newSubmission })
+            body: formData
         })
-            .then(() => {
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) throw new Error(data.error);
                 fetchAssignments();
                 setStudentFile(null);
                 setActiveAssignmentId(null);
+            })
+            .catch(error => {
+                setUploadError(error.message || 'Failed to submit assignment.');
             });
     };
 
@@ -194,7 +196,7 @@ export default function Assignments({ role }) {
             return;
         }
 
-        const matchPct = calculateMatchPercentage(sub.submissionText, assignment.answerKeyText);
+        const matchPct = calculateKeywordMatchPercentage(sub.submissionText, assignment.answerKeyText);
         let targetMatch = 85;
         if (assignment.difficulty === 'hard') targetMatch = 75;
         else if (assignment.difficulty === 'medium') targetMatch = 80;
@@ -209,6 +211,65 @@ export default function Assignments({ role }) {
             target: targetMatch + '%',
             score: (score * 100).toFixed(1) + '%'
         });
+    };
+
+    const saveAssignmentSettings = async (assignmentId) => {
+        const answerKeyText = answerKeyDraft[assignmentId] || '';
+        const difficulty = difficultySettings[assignmentId] || 'easy';
+        const targetMatch = targetSettings[assignmentId] || '';
+        const keyFile = answerKeyUpload[assignmentId] || null;
+
+        const formData = new FormData();
+        formData.append('difficulty', difficulty);
+        formData.append('targetMatch', targetMatch);
+        formData.append('answerKeyText', answerKeyText);
+        if (keyFile) {
+            formData.append('answerKey', keyFile);
+        }
+
+        try {
+            setSavingSettingsId(assignmentId);
+            const response = await fetch(`${API_BASE_URL}/assignments/${assignmentId}/settings`, {
+                method: 'PATCH',
+                body: formData
+            });
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Failed to save settings.');
+            }
+
+            setAnswerKeyUpload(prev => ({ ...prev, [assignmentId]: null }));
+            fetchAssignments();
+        } catch (error) {
+            alert(error.message || 'Failed to save assignment settings.');
+        } finally {
+            setSavingSettingsId(null);
+        }
+    };
+
+    const runBulkEvaluation = async (assignmentId) => {
+        const difficulty = difficultySettings[assignmentId] || 'easy';
+        const targetMatch = targetSettings[assignmentId] || '';
+
+        try {
+            setEvaluatingAssignmentId(assignmentId);
+            const response = await fetch(`${API_BASE_URL}/assignments/${assignmentId}/evaluate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ difficulty, targetMatch })
+            });
+            const data = await response.json();
+            if (!response.ok || data.error) {
+                throw new Error(data.error || 'Evaluation failed.');
+            }
+
+            fetchAssignments();
+            alert(`Evaluated ${data.evaluatedCount} submission(s) using two AI models. Best model was used per student.`);
+        } catch (error) {
+            alert(error.message || 'Failed to evaluate submissions.');
+        } finally {
+            setEvaluatingAssignmentId(null);
+        }
     };
 
     const handleCurveSettingChange = (assignmentId, val) => {
@@ -228,7 +289,7 @@ export default function Assignments({ role }) {
 
         // Calculate raw match for everyone
         let mapped = assignment.submissions.map(sub => {
-            const pct = calculateMatchPercentage(sub.submissionText, assignment.answerKeyText);
+            const pct = calculateKeywordMatchPercentage(sub.submissionText, assignment.answerKeyText);
             return { ...sub, rawMatchPct: pct };
         });
 
@@ -253,10 +314,6 @@ export default function Assignments({ role }) {
         document.body.appendChild(link); // Required for FF
         link.click();
         document.body.removeChild(link);
-    };
-
-    const downloadMock = (fileName) => {
-        alert(`Downloading ${fileName}... (Simulated)`);
     };
 
     return (
@@ -285,7 +342,7 @@ export default function Assignments({ role }) {
 
                         <div>
                             <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Description</label>
-                            <textarea required value={newDesc} onChange={e => setNewDesc(e.target.value)} className="input-base" placeholder="Provide instructions for the students..." style={{ resize: 'vertical', minHeight: '80px' }} />
+                            <textarea value={newDesc} onChange={e => setNewDesc(e.target.value)} className="input-base" placeholder="Optional instructions for students..." style={{ resize: 'vertical', minHeight: '80px' }} />
                         </div>
 
                         <div style={{ display: 'flex', gap: '1.5rem' }}>
@@ -321,19 +378,9 @@ export default function Assignments({ role }) {
                             </div>
                         </div>
 
-                        <div style={{ display: 'flex', gap: '1.5rem', marginTop: '0.5rem' }}>
-                            <div style={{ flex: 1 }}>
-                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Evaluation Difficulty</label>
-                                <select value={newDifficulty} onChange={e => setNewDifficulty(e.target.value)} className="input-base" style={{ background: 'var(--bg-dark)' }}>
-                                    <option value="easy">Easy (Requires 85% match)</option>
-                                    <option value="medium">Medium (Requires 80% match)</option>
-                                    <option value="hard">Hard (Requires 75% match)</option>
-                                </select>
-                            </div>
-                            <div style={{ flex: 1 }}>
-                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Due Date & Time</label>
-                                <input type="datetime-local" required value={newDueDate} onChange={e => setNewDueDate(e.target.value)} className="input-base" style={{ background: 'var(--bg-dark)', colorScheme: 'dark' }} />
-                            </div>
+                        <div style={{ marginTop: '0.5rem' }}>
+                            <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Due Date & Time (Optional)</label>
+                            <input type="datetime-local" value={newDueDate} onChange={e => setNewDueDate(e.target.value)} className="input-base" style={{ background: 'var(--bg-dark)', colorScheme: 'dark' }} />
                         </div>
 
                         <button type="submit" className="btn-primary" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginTop: '1rem', width: '200px' }}>
@@ -351,12 +398,13 @@ export default function Assignments({ role }) {
                     </div>
                 ) : (
                     assignments.map(assignment => {
-                        const dueDateObj = new Date(assignment.dueDate);
-                        const formattedDate = dueDateObj.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+                        const dueDateObj = assignment.dueDate ? new Date(assignment.dueDate) : null;
+                        const hasDue = dueDateObj && !Number.isNaN(dueDateObj.getTime());
+                        const formattedDate = hasDue ? dueDateObj.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'No due date';
 
                         // Student specific vars
                         const studentSubmission = role === 'student' ? assignment.submissions.find(s => s.studentEmail === currentUserEmail) : null;
-                        const isPastDue = new Date() > dueDateObj;
+                        const isPastDue = hasDue ? new Date() > dueDateObj : false;
 
                         return (
                             <div key={assignment.id} style={{ padding: '1.5rem', background: 'var(--glass-bg)', borderRadius: '12px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -370,7 +418,7 @@ export default function Assignments({ role }) {
                                                 </button>
                                             )}
                                         </h3>
-                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', lineHeight: '1.5' }}>{assignment.description}</p>
+                                        <p style={{ color: 'var(--text-muted)', fontSize: '0.95rem', lineHeight: '1.5' }}>{assignment.description || 'No description provided.'}</p>
                                     </div>
                                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 12px', borderRadius: '8px', background: isPastDue ? 'rgba(239, 68, 68, 0.1)' : 'rgba(16, 185, 129, 0.1)', color: isPastDue ? '#ef4444' : '#10b981', fontSize: '0.85rem', fontWeight: 600 }}>
                                         <Clock size={16} /> Due: {formattedDate}
@@ -378,11 +426,11 @@ export default function Assignments({ role }) {
                                 </div>
 
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                                    {assignment.fileName && (
+                                    {assignment.questionPaperUrl && (
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                                            <button onClick={() => downloadMock(assignment.fileName)} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 16px', background: 'rgba(99, 102, 241, 0.1)', color: 'var(--primary)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)', fontSize: '0.9rem' }}>
-                                                <Download size={16} /> Download Attachment: {assignment.fileName}
-                                            </button>
+                                            <a href={`${apiBaseOrigin}${assignment.questionPaperUrl}`} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 16px', background: 'rgba(99, 102, 241, 0.1)', color: 'var(--primary)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)', fontSize: '0.9rem', textDecoration: 'none' }}>
+                                                <Download size={16} /> Download Question Paper: {assignment.questionPaperName || 'Attachment'}
+                                            </a>
                                         </div>
                                     )}
                                 </div>
@@ -393,6 +441,44 @@ export default function Assignments({ role }) {
                                         <h4 style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '1rem', color: 'var(--text-main)', marginBottom: '1rem' }}>
                                             <Users size={18} /> Student Submissions ({assignment.submissions.length})
                                         </h4>
+
+                                        <div style={{ marginBottom: '1rem', padding: '12px', borderRadius: '8px', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+                                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '8px' }}>
+                                                <div>
+                                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>Difficulty (set manually)</label>
+                                                    <select value={difficultySettings[assignment.id] || assignment.difficulty || 'easy'} onChange={event => setDifficultySettings(prev => ({ ...prev, [assignment.id]: event.target.value }))} className="input-base" style={{ background: 'var(--bg-dark)', padding: '8px' }}>
+                                                        <option value="easy">Easy</option>
+                                                        <option value="medium">Medium</option>
+                                                        <option value="hard">Hard</option>
+                                                    </select>
+                                                </div>
+                                                <div>
+                                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>Threshold % for max marks</label>
+                                                    <input type="number" min="1" max="100" value={targetSettings[assignment.id] || assignment.targetMatch || ''} onChange={event => setTargetSettings(prev => ({ ...prev, [assignment.id]: event.target.value }))} className="input-base" placeholder="Auto by difficulty" style={{ background: 'var(--bg-dark)', padding: '8px' }} />
+                                                </div>
+                                                <div>
+                                                    <label style={{ display: 'block', marginBottom: '4px', fontSize: '0.8rem', color: 'var(--text-muted)' }}>Answer Key File (optional)</label>
+                                                    <input type="file" accept=".pdf,.docx" onChange={event => setAnswerKeyUpload(prev => ({ ...prev, [assignment.id]: event.target.files?.[0] || null }))} className="input-base" style={{ padding: '6px' }} />
+                                                </div>
+                                            </div>
+
+                                            <textarea value={answerKeyDraft[assignment.id] ?? assignment.answerKeyText ?? ''} onChange={event => setAnswerKeyDraft(prev => ({ ...prev, [assignment.id]: event.target.value }))} className="input-base" placeholder="Paste or edit answer key text here (optional at creation, can be set now)." style={{ minHeight: '80px', resize: 'vertical', marginBottom: '8px' }} />
+
+                                            <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                                <button onClick={() => saveAssignmentSettings(assignment.id)} className="btn-primary" style={{ padding: '7px 12px', fontSize: '0.85rem' }} disabled={savingSettingsId === assignment.id}>
+                                                    {savingSettingsId === assignment.id ? 'Saving...' : 'Save Evaluation Settings'}
+                                                </button>
+                                                <button onClick={() => runBulkEvaluation(assignment.id)} className="btn-primary" style={{ padding: '7px 12px', fontSize: '0.85rem', background: 'rgba(16, 185, 129, 0.2)', border: '1px solid rgba(16, 185, 129, 0.3)', color: '#10b981' }} disabled={evaluatingAssignmentId === assignment.id}>
+                                                    {evaluatingAssignmentId === assignment.id ? 'Evaluating...' : 'Evaluate All Submissions (2 AI models + best score)'}
+                                                </button>
+                                                {assignment.answerKeyUrl && (
+                                                    <a href={`${apiBaseOrigin}${assignment.answerKeyUrl}`} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.85rem', textDecoration: 'none' }}>
+                                                        Download Answer Key File
+                                                    </a>
+                                                )}
+                                            </div>
+                                        </div>
+
                                         {assignment.submissions.length === 0 ? (
                                             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No submissions yet.</p>
                                         ) : (
@@ -442,15 +528,27 @@ export default function Assignments({ role }) {
                                                         <div>
                                                             <div style={{ fontSize: '0.95rem', fontWeight: 600 }}>{sub.studentEmail}</div>
                                                             <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.25rem' }}>
-                                                                <button onClick={() => downloadMock(sub.fileName)} style={{ color: 'var(--primary)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                                                    <Download size={14} /> {sub.fileName}
-                                                                </button>
+                                                                {sub.fileUrl ? (
+                                                                    <a href={`${apiBaseOrigin}${sub.fileUrl}`} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '4px', textDecoration: 'none' }}>
+                                                                        <Download size={14} /> {sub.fileName || 'Download Submission'}
+                                                                    </a>
+                                                                ) : (
+                                                                    <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{sub.fileName || 'No file attached'}</span>
+                                                                )}
                                                                 {assignment.answerKeyText && sub.submissionText && (
                                                                     <button onClick={() => handleAutoGrade(assignment, sub)} style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', border: 'none', borderRadius: '4px', padding: '2px 8px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
                                                                         <CheckSquare size={14} /> Grade with AI Tool
                                                                     </button>
                                                                 )}
                                                             </div>
+                                                            {(sub.aiModel1Match !== null || sub.aiModel2Match !== null || sub.bestMatch !== null) && (
+                                                                <div style={{ marginTop: '6px', fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                                                                    <span>AI-1: {sub.aiModel1Match ?? 'N/A'}%</span>
+                                                                    <span>AI-2: {sub.aiModel2Match ?? 'N/A'}%</span>
+                                                                    <span>Best: {sub.bestMatch ?? 'N/A'}%</span>
+                                                                    <span style={{ color: '#10b981', fontWeight: 600 }}>Marks: {sub.finalScorePct ?? 'N/A'}%</span>
+                                                                </div>
+                                                            )}
                                                         </div>
                                                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '4px' }}>
                                                             <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{new Date(sub.submittedAt).toLocaleString()}</span>
