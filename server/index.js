@@ -518,7 +518,7 @@ cron.schedule('* * * * *', async () => {
         async (err, rows) => {
             if (err) return console.error('[CRON] DB error:', err);
             
-            // Filter: reminder time has passed
+            console.log('[CRON] All todos with reminders:', JSON.stringify(rows.map(r => ({id: r.id, reminder: r.reminder, reminderSent: r.reminderSent}))));
             const due = rows.filter(todo => new Date(todo.reminder) <= now);
             console.log('[CRON] Pending reminders found:', due.length);
 
