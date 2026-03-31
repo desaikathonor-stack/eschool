@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react';
-import { Plus, Save, Upload, Download, FileText, CheckCircle, Clock, Users, X, AlertCircle, Trash2, CheckSquare, TrendingUp } from 'lucide-react';
+import { Plus, Save, Upload, Download, FileText, CheckCircle, Clock, Users, X, AlertCircle, Trash2, TrendingUp } from 'lucide-react';
 import API_BASE_URL from '../utils/api';
 import { extractTextFromFile, isPdfOrDocx } from '../utils/documentUtils';
-import { calculateKeywordMatchPercentage } from '../utils/scoringUtils';
 
 export default function Assignments({ role }) {
     const [assignments, setAssignments] = useState([]);
@@ -14,7 +13,6 @@ export default function Assignments({ role }) {
     const [newDueDate, setNewDueDate] = useState('');
     const [teacherFile, setTeacherFile] = useState(null);
     const [answerKeyFile, setAnswerKeyFile] = useState(null);
-    const [evaluatingSub, setEvaluatingSub] = useState(null);
     const [savingSettingsId, setSavingSettingsId] = useState(null);
     const [evaluatingAssignmentId, setEvaluatingAssignmentId] = useState(null);
 
@@ -34,14 +32,31 @@ export default function Assignments({ role }) {
     const currentUserEmail = localStorage.getItem('eschool_current_user') || 'anonymous_student';
     const apiBaseOrigin = API_BASE_URL.replace('/api', '');
 
+    const readJsonSafely = async (response) => {
+        const contentType = response.headers.get('content-type') || '';
+        const text = await response.text();
+        try {
+            return text ? JSON.parse(text) : {};
+        } catch (_err) {
+            const looksLikeHtml = text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html') || contentType.includes('text/html');
+            if (looksLikeHtml) {
+                return { error: 'Backend API returned HTML instead of JSON. Set VITE_API_BASE_URL to your backend URL and redeploy.' };
+            }
+            return { error: text || 'Unexpected server response.' };
+        }
+    };
+
     useEffect(() => {
         fetchAssignments();
     }, []);
 
     const fetchAssignments = () => {
         fetch(`${API_BASE_URL}/assignments`)
-            .then(res => res.json())
+            .then(readJsonSafely)
             .then(data => {
+                if (!Array.isArray(data)) {
+                    throw new Error(data?.error || 'Failed to load assignments.');
+                }
                 setAssignments(data);
                 setDifficultySettings(prev => {
                     const next = { ...prev };
@@ -107,7 +122,7 @@ export default function Assignments({ role }) {
             method: 'POST',
             body: formData
         })
-            .then(res => res.json())
+            .then(readJsonSafely)
             .then(data => {
                 if (data.error) throw new Error(data.error);
                 setAssignments(prev => [data, ...prev]);
@@ -178,7 +193,7 @@ export default function Assignments({ role }) {
             method: 'PATCH',
             body: formData
         })
-            .then(res => res.json())
+            .then(readJsonSafely)
             .then(data => {
                 if (data.error) throw new Error(data.error);
                 fetchAssignments();
@@ -188,29 +203,6 @@ export default function Assignments({ role }) {
             .catch(error => {
                 setUploadError(error.message || 'Failed to submit assignment.');
             });
-    };
-
-    const handleAutoGrade = (assignment, sub) => {
-        if (!assignment.answerKeyText || !sub.submissionText) {
-            alert('Cannot auto-grade. Please ensure both an Answer Key was uploaded and the student submitted a readable PDF/Docx.');
-            return;
-        }
-
-        const matchPct = calculateKeywordMatchPercentage(sub.submissionText, assignment.answerKeyText);
-        let targetMatch = 85;
-        if (assignment.difficulty === 'hard') targetMatch = 75;
-        else if (assignment.difficulty === 'medium') targetMatch = 80;
-        else if (assignment.difficulty === 'easy') targetMatch = 85;
-
-        let score = (matchPct >= targetMatch) ? 1.0 : (matchPct / targetMatch);
-        score = Math.min(1.0, score); // clamp to 1.0
-
-        setEvaluatingSub({
-            studentId: sub.studentEmail,
-            match: matchPct.toFixed(1) + '%',
-            target: targetMatch + '%',
-            score: (score * 100).toFixed(1) + '%'
-        });
     };
 
     const saveAssignmentSettings = async (assignmentId) => {
@@ -233,7 +225,7 @@ export default function Assignments({ role }) {
                 method: 'PATCH',
                 body: formData
             });
-            const data = await response.json();
+            const data = await readJsonSafely(response);
             if (!response.ok || data.error) {
                 throw new Error(data.error || 'Failed to save settings.');
             }
@@ -258,13 +250,13 @@ export default function Assignments({ role }) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ difficulty, targetMatch })
             });
-            const data = await response.json();
+            const data = await readJsonSafely(response);
             if (!response.ok || data.error) {
                 throw new Error(data.error || 'Evaluation failed.');
             }
 
             fetchAssignments();
-            alert(`Evaluated ${data.evaluatedCount} submission(s) using two AI models. Best model was used per student.`);
+            alert(`Evaluated ${data.evaluatedCount} submission(s) using external AI models. Best model was used per student.`);
         } catch (error) {
             alert(error.message || 'Failed to evaluate submissions.');
         } finally {
@@ -277,8 +269,8 @@ export default function Assignments({ role }) {
     };
 
     const exportCurvedGradesCSV = (assignment) => {
-        if (!assignment.answerKeyText) {
-            alert("Cannot curve without an answer key!");
+        if (!assignment.submissions.length) {
+            alert('No submissions available for export.');
             return;
         }
         const maxScore = parseFloat(curveSettings[assignment.id]);
@@ -287,9 +279,8 @@ export default function Assignments({ role }) {
             return;
         }
 
-        // Calculate raw match for everyone
         let mapped = assignment.submissions.map(sub => {
-            const pct = calculateKeywordMatchPercentage(sub.submissionText, assignment.answerKeyText);
+            const pct = Number(sub.bestMatch ?? sub.aiModel1Match ?? sub.aiModel2Match ?? 0);
             return { ...sub, rawMatchPct: pct };
         });
 
@@ -483,29 +474,6 @@ export default function Assignments({ role }) {
                                             <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>No submissions yet.</p>
                                         ) : (
                                             <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                                                {evaluatingSub && (
-                                                    <div style={{ padding: '15px', background: 'rgba(99, 102, 241, 0.1)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
-                                                        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                                                            <strong style={{ color: 'var(--primary)' }}>Auto-Grade Result for {evaluatingSub.studentId}</strong>
-                                                            <button onClick={() => setEvaluatingSub(null)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}><X size={16} /></button>
-                                                        </div>
-                                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginTop: '10px' }}>
-                                                            <div>
-                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Match % Found</div>
-                                                                <div style={{ fontSize: '1.2rem', fontWeight: 600 }}>{evaluatingSub.match}</div>
-                                                            </div>
-                                                            <div>
-                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Target to hit</div>
-                                                                <div style={{ fontSize: '1.2rem', fontWeight: 600 }}>{evaluatingSub.target}</div>
-                                                            </div>
-                                                            <div>
-                                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Final Score</div>
-                                                                <div style={{ fontSize: '1.2rem', fontWeight: 600, color: '#10b981' }}>{evaluatingSub.score}</div>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                )}
-
                                                 {assignment.answerKeyText && assignment.submissions.length > 0 && (
                                                     <div style={{ padding: '15px', background: 'rgba(99, 102, 241, 0.05)', borderRadius: '8px', border: '1px solid rgba(99, 102, 241, 0.2)', marginBottom: '0.5rem' }}>
                                                         <h5 style={{ margin: '0 0 10px 0', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--primary)' }}>
@@ -519,7 +487,7 @@ export default function Assignments({ role }) {
                                                                 <Download size={14} /> Export Marks (CSV)
                                                             </button>
                                                         </div>
-                                                        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '8px 0 0 0' }}>The system finds the highest matching PDF, assigns them the marks above, and auto-distributes relative proportional marks to everyone else.</p>
+                                                        <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', margin: '8px 0 0 0' }}>The system uses external AI match scores, assigns top marks to highest match, and distributes relative proportional marks.</p>
                                                     </div>
                                                 )}
 
@@ -536,9 +504,9 @@ export default function Assignments({ role }) {
                                                                     <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{sub.fileName || 'No file attached'}</span>
                                                                 )}
                                                                 {assignment.answerKeyText && sub.submissionText && (
-                                                                    <button onClick={() => handleAutoGrade(assignment, sub)} style={{ background: 'rgba(16, 185, 129, 0.1)', color: '#10b981', border: 'none', borderRadius: '4px', padding: '2px 8px', fontSize: '0.8rem', display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}>
-                                                                        <CheckSquare size={14} /> Grade with AI Tool
-                                                                    </button>
+                                                                    <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                                                                        Use "Evaluate All Submissions" for external AI scoring.
+                                                                    </span>
                                                                 )}
                                                             </div>
                                                             {(sub.aiModel1Match !== null || sub.aiModel2Match !== null || sub.bestMatch !== null) && (

@@ -1,7 +1,11 @@
 // src/utils/api.js
-// Set your API URL here. For local development use 'http://localhost:5000'
-// For production, replace it with your hosted backend URL (e.g. 'https://my-eschool-api.onrender.com')
+// Preferred: configure VITE_API_BASE_URL in env.
+// Fallback behavior:
+// - local dev => http://localhost:5000/api
+// - deployed host => /api (same-origin)
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+const configuredApiBase = import.meta.env.VITE_API_BASE_URL;
+const isLocalHost = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
+const API_BASE_URL = configuredApiBase || (isLocalHost ? 'http://localhost:5000/api' : '/api');
 
 export default API_BASE_URL;

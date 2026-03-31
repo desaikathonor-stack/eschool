@@ -17,9 +17,7 @@ export default function Layout({ children, role, activeTab, setActiveTab }) {
             { id: 'assignments', icon: <ClipboardList size={20} />, label: 'Assignments / Assessments' }
         ];
         if (role === 'student') {
-            base.push({ id: 'education', icon: <MonitorPlay size={20} />, label: 'Quizzes & Learning' });
-        } else {
-            base.push({ id: 'quizSettings', icon: <Settings size={20} />, label: 'Quizzes' });
+            base.push({ id: 'education', icon: <MonitorPlay size={20} />, label: 'Learning' });
         }
         return base;
     };

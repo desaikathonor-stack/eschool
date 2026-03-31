@@ -141,6 +141,121 @@ function resolveTargetMatch(difficulty, explicitTarget) {
     return 85;
 }
 
+const EXTERNAL_AI_BASE_URL = (process.env.EXTERNAL_AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
+const EXTERNAL_AI_API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
+const EXTERNAL_AI_MODEL_1 = process.env.EXTERNAL_AI_MODEL_1 || 'gpt-4o-mini';
+const EXTERNAL_AI_MODEL_2 = process.env.EXTERNAL_AI_MODEL_2 || 'gpt-4.1-mini';
+
+function ensureExternalAIConfigured() {
+    return Boolean(EXTERNAL_AI_API_KEY);
+}
+
+function parseAiScoreContent(rawText) {
+    const fallback = { score: 0, feedback: '' };
+    if (!rawText) return fallback;
+
+    const text = String(rawText).trim();
+    const withoutFences = text
+        .replace(/^```json\s*/i, '')
+        .replace(/^```\s*/i, '')
+        .replace(/```$/i, '')
+        .trim();
+
+    try {
+        const parsed = JSON.parse(withoutFences);
+        const score = clamp(Number(parsed.score), 0, 100);
+        return {
+            score: Number.isFinite(score) ? score : 0,
+            feedback: String(parsed.feedback || '').slice(0, 600)
+        };
+    } catch (_error) {
+        const objectMatch = withoutFences.match(/\{[\s\S]*\}/);
+        if (objectMatch) {
+            try {
+                const parsed = JSON.parse(objectMatch[0]);
+                const score = clamp(Number(parsed.score), 0, 100);
+                return {
+                    score: Number.isFinite(score) ? score : 0,
+                    feedback: String(parsed.feedback || '').slice(0, 600)
+                };
+            } catch (_nestedError) {
+                const scoreMatch = withoutFences.match(/"?score"?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)/i);
+                const feedbackMatch = withoutFences.match(/"?feedback"?\s*[:=]\s*"?([\s\S]{1,300})"?/i);
+                const score = clamp(Number(scoreMatch?.[1] || 0), 0, 100);
+                return {
+                    score: Number.isFinite(score) ? score : 0,
+                    feedback: String(feedbackMatch?.[1] || '').slice(0, 600)
+                };
+            }
+        }
+
+        const scoreMatch = withoutFences.match(/([0-9]+(?:\.[0-9]+)?)\s*%?/);
+        const score = clamp(Number(scoreMatch?.[1] || 0), 0, 100);
+        return {
+            score: Number.isFinite(score) ? score : 0,
+            feedback: withoutFences.slice(0, 600)
+        };
+    }
+}
+
+async function scoreWithExternalAI({ model, studentAnswer, answerKey, contextLabel }) {
+    if (!ensureExternalAIConfigured()) {
+        throw new Error('External AI is not configured. Set EXTERNAL_AI_API_KEY in server environment.');
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000);
+
+    try {
+        const response = await fetch(`${EXTERNAL_AI_BASE_URL}/chat/completions`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${EXTERNAL_AI_API_KEY}`
+            },
+            body: JSON.stringify({
+                model,
+                temperature: 0.1,
+                messages: [
+                    {
+                        role: 'system',
+                        content: 'You are a strict academic evaluator. Return JSON only with keys: score (0-100 number), feedback (short string).'
+                    },
+                    {
+                        role: 'user',
+                        content: [
+                            `Context: ${contextLabel}`,
+                            'Evaluate the student answer against the answer key.',
+                            'Scoring rules: semantic correctness, coverage of key points, accuracy, and clarity.',
+                            'Return only JSON object: {"score": <0-100>, "feedback": "..."}.',
+                            `Answer Key:\n${String(answerKey || '').slice(0, 8000)}`,
+                            `Student Answer:\n${String(studentAnswer || '').slice(0, 8000)}`
+                        ].join('\n\n')
+                    }
+                ]
+            }),
+            signal: controller.signal
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`External AI request failed (${response.status}): ${errorText.slice(0, 300)}`);
+        }
+
+        const payload = await response.json();
+        const rawContent = Array.isArray(payload?.choices?.[0]?.message?.content)
+            ? payload.choices[0].message.content.map(part => part?.text || '').join('\n')
+            : payload?.choices?.[0]?.message?.content;
+        const parsed = parseAiScoreContent(rawContent);
+        return {
+            score: Number(parsed.score.toFixed(2)),
+            feedback: parsed.feedback
+        };
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 app.use('/uploads', express.static(uploadRoot));
@@ -577,6 +692,10 @@ app.patch('/api/assignments/:id/submit', assignmentUpload.single('submissionFile
 
 app.post('/api/assignments/:id/evaluate', async (req, res) => {
     try {
+        if (!ensureExternalAIConfigured()) {
+            return res.status(503).json({ error: 'External AI is not configured. Set EXTERNAL_AI_API_KEY on the server.' });
+        }
+
         const assignment = await getSql("SELECT * FROM assignments WHERE id = ?", [req.params.id]);
         if (!assignment) {
             return res.status(404).json({ error: 'Assignment not found.' });
@@ -595,10 +714,25 @@ app.post('/api/assignments/:id/evaluate', async (req, res) => {
             return res.status(400).json({ error: 'No submissions found to evaluate.' });
         }
 
-        const evaluated = submissions.map((submission) => {
+        const evaluated = await Promise.all(submissions.map(async (submission) => {
             const text = String(submission.submissionText || '');
-            const model1 = scoreByKeywordCoverage(text, answerKeyText);
-            const model2 = scoreByJaccard(text, answerKeyText);
+            const [model1Result, model2Result] = await Promise.all([
+                scoreWithExternalAI({
+                    model: EXTERNAL_AI_MODEL_1,
+                    studentAnswer: text,
+                    answerKey: answerKeyText,
+                    contextLabel: `Assignment ${assignment.title || assignment.id} - Model 1`
+                }),
+                scoreWithExternalAI({
+                    model: EXTERNAL_AI_MODEL_2,
+                    studentAnswer: text,
+                    answerKey: answerKeyText,
+                    contextLabel: `Assignment ${assignment.title || assignment.id} - Model 2`
+                })
+            ]);
+
+            const model1 = model1Result.score;
+            const model2 = model2Result.score;
             const bestMatch = Math.max(model1, model2);
             const scorePct = clamp((bestMatch / targetMatch) * 100, 0, 100);
 
@@ -608,9 +742,11 @@ app.post('/api/assignments/:id/evaluate', async (req, res) => {
                 aiModel2Match: Number(model2.toFixed(2)),
                 bestMatch: Number(bestMatch.toFixed(2)),
                 finalScorePct: Number(scorePct.toFixed(2)),
+                aiModel1Feedback: model1Result.feedback,
+                aiModel2Feedback: model2Result.feedback,
                 evaluatedAt: new Date().toISOString()
             };
-        });
+        }));
 
         await runSql(
             "UPDATE assignments SET submissions = ?, difficulty = ?, targetMatch = ? WHERE id = ?",
@@ -775,6 +911,10 @@ app.post('/api/attempts', (req, res) => {
 
 app.post('/api/attempts/:id/evaluate-ai', async (req, res) => {
     try {
+        if (!ensureExternalAIConfigured()) {
+            return res.status(503).json({ error: 'External AI is not configured. Set EXTERNAL_AI_API_KEY on the server.' });
+        }
+
         const attempt = await getSql("SELECT * FROM attempts WHERE id = ?", [req.params.id]);
         if (!attempt) {
             return res.status(404).json({ error: 'Attempt not found.' });
@@ -799,12 +939,28 @@ app.post('/api/attempts/:id/evaluate-ai', async (req, res) => {
         let model1Total = 0;
         let model2Total = 0;
 
-        descriptive.forEach((question, index) => {
+        for (let index = 0; index < descriptive.length; index += 1) {
+            const question = descriptive[index];
             const studentAnswer = responses[index] ?? responses[String(index)] ?? '';
             const answerKey = question.answerKey || '';
-            model1Total += scoreByKeywordCoverage(studentAnswer, answerKey);
-            model2Total += scoreByJaccard(studentAnswer, answerKey);
-        });
+            const [model1Result, model2Result] = await Promise.all([
+                scoreWithExternalAI({
+                    model: EXTERNAL_AI_MODEL_1,
+                    studentAnswer,
+                    answerKey,
+                    contextLabel: `Subjective quiz ${attempt.quiz_id} question ${index + 1} - Model 1`
+                }),
+                scoreWithExternalAI({
+                    model: EXTERNAL_AI_MODEL_2,
+                    studentAnswer,
+                    answerKey,
+                    contextLabel: `Subjective quiz ${attempt.quiz_id} question ${index + 1} - Model 2`
+                })
+            ]);
+
+            model1Total += model1Result.score;
+            model2Total += model2Result.score;
+        }
 
         const model1Score = clamp(model1Total / descriptive.length, 0, 100);
         const model2Score = clamp(model2Total / descriptive.length, 0, 100);

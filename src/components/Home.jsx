@@ -24,10 +24,10 @@ export default function Home({ setActiveTab, role }) {
         setActiveTab('whiteboard');
     };
 
-    const learningTabId = role === 'teacher' ? 'quizSettings' : 'education';
-    const learningTitle = role === 'teacher' ? 'Manage Quizzes' : 'Continue Learning';
+    const learningTabId = role === 'teacher' ? 'assignments' : 'education';
+    const learningTitle = role === 'teacher' ? 'Manage Assessments' : 'Continue Learning';
     const learningText = role === 'teacher'
-        ? 'Create quizzes, review submissions, and finalize scores.'
+        ? 'Review submissions and run assignment evaluation.'
         : 'Resume your curriculum modules and quiz practice.';
 
     return (

@@ -27,6 +27,30 @@ export default function TeacherQuizSettings() {
     const [evaluationByAttempt, setEvaluationByAttempt] = useState({});
     const [finalScoreByAttempt, setFinalScoreByAttempt] = useState({});
 
+    const readApiPayload = async (response) => {
+        const contentType = response.headers.get('content-type') || '';
+        const text = await response.text();
+
+        let data = {};
+        if (text) {
+            try {
+                data = JSON.parse(text);
+            } catch (_parseError) {
+                const looksLikeHtml = text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html') || contentType.includes('text/html');
+                if (looksLikeHtml) {
+                    throw new Error('Backend API returned HTML instead of JSON. Set VITE_API_BASE_URL to your backend URL and redeploy.');
+                }
+                throw new Error(text.slice(0, 200) || 'Unexpected server response.');
+            }
+        }
+
+        if (!response.ok) {
+            throw new Error(data.error || `Server error: ${response.status}`);
+        }
+
+        return data;
+    };
+
     useEffect(() => {
         fetchQuizzes();
         fetchAttempts();
@@ -53,14 +77,14 @@ export default function TeacherQuizSettings() {
 
     const fetchAttempts = () => {
         fetch(`${API_BASE_URL}/admin/attempts`)
-            .then(res => res.json())
+            .then(readApiPayload)
             .then(data => setAttempts(data || []))
             .catch(err => console.error("Fetch attempts error:", err));
     };
 
     const fetchQuizzes = () => {
         fetch(`${API_BASE_URL}/quizzes`)
-            .then(res => res.json())
+            .then(readApiPayload)
             .then(data => setQuizzes(data))
             .catch(err => console.error("Fetch quizzes error:", err));
     };
@@ -205,10 +229,7 @@ export default function TeacherQuizSettings() {
                 method: 'POST',
                 body: formData
             });
-            if (!res.ok) throw new Error(`Server error: ${res.status}`);
-
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
+            const data = await readApiPayload(res);
 
             setQuizzes(prev => [data, ...prev]);
             setIsCreating(false);
@@ -245,10 +266,7 @@ export default function TeacherQuizSettings() {
         try {
             setEvaluatingAttemptId(attemptId);
             const response = await fetch(`${API_BASE_URL}/attempts/${attemptId}/evaluate-ai`, { method: 'POST' });
-            const data = await response.json();
-            if (!response.ok || data.error) {
-                throw new Error(data.error || 'AI evaluation failed.');
-            }
+            const data = await readApiPayload(response);
 
             setEvaluationByAttempt(prev => ({ ...prev, [attemptId]: data }));
             setFinalScoreByAttempt(prev => ({ ...prev, [attemptId]: String(Math.round(data.recommendedScore)) }));
@@ -273,10 +291,7 @@ export default function TeacherQuizSettings() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ finalScore: value })
             });
-            const data = await response.json();
-            if (!response.ok || data.error) {
-                throw new Error(data.error || 'Failed to finalize score.');
-            }
+            await readApiPayload(response);
 
             fetchAttempts();
             alert('Final score saved and visible to student.');
