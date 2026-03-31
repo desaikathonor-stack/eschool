@@ -506,7 +506,6 @@ function getSql(sql, params = []) {
     });
 }
 
-// 3. BACKGROUND SCHEDULER
 cron.schedule('* * * * *', async () => {
     const now = new Date().toISOString();
 
@@ -527,7 +526,6 @@ cron.schedule('* * * * *', async () => {
                 } catch (emailErr) {
                     console.error(`[CRON] Email failed for todo ${todo.id}:`, emailErr.message);
                 }
-                // Mark as sent whether email succeeded or failed (prevents retry loop)
                 db.run("UPDATE todos SET reminderSent = 1 WHERE id = ?", [todo.id]);
             }
         }
