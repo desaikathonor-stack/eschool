@@ -509,17 +509,20 @@ function getSql(sql, params = []) {
 }
 
 cron.schedule('* * * * *', async () => {
-    const now = new Date().toISOString();
-    console.log('[CRON] Tick at:', now);
+    const now = new Date();
+    console.log('[CRON] Tick at:', now.toISOString());
 
     db.all(
-        "SELECT * FROM todos WHERE reminderSent = 0 AND reminder IS NOT NULL AND reminder <= ?",
-        [now],
+        "SELECT * FROM todos WHERE reminderSent = 0 AND reminder IS NOT NULL",
+        [],
         async (err, rows) => {
             if (err) return console.error('[CRON] DB error:', err);
-            console.log('[CRON] Pending reminders found:', rows.length);
+            
+            // Filter: reminder time has passed
+            const due = rows.filter(todo => new Date(todo.reminder) <= now);
+            console.log('[CRON] Pending reminders found:', due.length);
 
-            for (const todo of rows) {
+            for (const todo of due) {
                 console.log('[CRON] Processing todo:', todo.id, todo.text, todo.reminder);
                 try {
                     await sendReminderEmail(
