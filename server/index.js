@@ -5,9 +5,13 @@ const cors = require('cors');
 const sqlite3 = require('sqlite3').verbose();
 const cron = require('node-cron');
 const emailjs = require('@emailjs/nodejs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+const PASSWORD_PREFIX = 'scrypt';
+const SCRYPT_KEY_LENGTH = 64;
 
 app.use(cors());
 app.use(express.json());
@@ -23,7 +27,52 @@ db.serialize(() => {
     db.run("CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, quiz_id INTEGER, student_email TEXT, score TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS whiteboards (email TEXT PRIMARY KEY, slides_data TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS saved_whiteboards (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, title TEXT, slides_data TEXT, created_at TEXT)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_todos_user_email ON todos(user_email)");
+    db.run("CREATE INDEX IF NOT EXISTS idx_todos_reminder_pending ON todos(reminderSent, reminder)");
 });
+
+function hashPassword(password) {
+    return new Promise((resolve, reject) => {
+        const salt = crypto.randomBytes(16).toString('hex');
+        crypto.scrypt(password, salt, SCRYPT_KEY_LENGTH, (err, derivedKey) => {
+            if (err) return reject(err);
+            resolve(`${PASSWORD_PREFIX}$${salt}$${derivedKey.toString('hex')}`);
+        });
+    });
+}
+
+function verifyHashedPassword(password, storedPassword) {
+    if (!storedPassword || !storedPassword.startsWith(`${PASSWORD_PREFIX}$`)) {
+        return false;
+    }
+
+    const [prefix, salt, hashHex] = storedPassword.split('$');
+    if (prefix !== PASSWORD_PREFIX || !salt || !hashHex) {
+        return false;
+    }
+
+    const storedBuffer = Buffer.from(hashHex, 'hex');
+    const derivedBuffer = crypto.scryptSync(password, salt, storedBuffer.length);
+    return crypto.timingSafeEqual(storedBuffer, derivedBuffer);
+}
+
+function runSql(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.run(sql, params, function (err) {
+            if (err) return reject(err);
+            resolve(this);
+        });
+    });
+}
+
+function getSql(sql, params = []) {
+    return new Promise((resolve, reject) => {
+        db.get(sql, params, (err, row) => {
+            if (err) return reject(err);
+            resolve(row);
+        });
+    });
+}
 
 // 3. BACKGROUND SCHEDULER
 cron.schedule('* * * * *', async () => {
@@ -67,18 +116,66 @@ cron.schedule('* * * * *', async () => {
 // 4. API ENDPOINTS
 
 // --- USERS ---
-app.post('/api/login', (req, res) => {
-    const { email, password, name, role } = req.body;
-    db.get("SELECT * FROM users WHERE email = ?", [email], (err, user) => {
-        if (!user) {
-            db.run("INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)", [email, password, name, role], () => {
-                res.json({ success: true, user: { email, name, role } });
-            });
-        } else {
-            res.json({ success: true, user });
+async function handleAuth(req, res) {
+    try {
+        const { email, password, name, role, action } = req.body;
+        const normalizedEmail = String(email || '').trim().toLowerCase();
+
+        if (!normalizedEmail || !password) {
+            return res.status(400).json({ success: false, error: 'Email and password are required.' });
         }
-    });
-});
+
+        const user = await getSql("SELECT * FROM users WHERE email = ?", [normalizedEmail]);
+        const isSignup = action === 'signup';
+
+        if (isSignup) {
+            if (user) {
+                return res.status(409).json({ success: false, error: 'User already exists. Please log in.' });
+            }
+
+            const hashedPassword = await hashPassword(password);
+            const safeName = String(name || '').trim() || normalizedEmail.split('@')[0];
+            const safeRole = role === 'teacher' ? 'teacher' : 'student';
+
+            await runSql(
+                "INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)",
+                [normalizedEmail, hashedPassword, safeName, safeRole]
+            );
+
+            return res.json({ success: true, user: { email: normalizedEmail, name: safeName, role: safeRole } });
+        }
+
+        if (!user) {
+            return res.status(404).json({ success: false, error: 'User not found. Please sign up first.' });
+        }
+
+        const isValidHashed = verifyHashedPassword(password, user.password);
+        const isValidLegacy = user.password === password;
+        if (!isValidHashed && !isValidLegacy) {
+            return res.status(401).json({ success: false, error: 'Incorrect password.' });
+        }
+
+        if (isValidLegacy) {
+            const upgradedHash = await hashPassword(password);
+            await runSql("UPDATE users SET password = ? WHERE email = ?", [upgradedHash, normalizedEmail]);
+        }
+
+        return res.json({
+            success: true,
+            user: {
+                email: user.email,
+                name: user.name,
+                role: user.role === 'teacher' ? 'teacher' : 'student'
+            }
+        });
+    } catch (error) {
+        console.error('[AUTH] Error:', error);
+        return res.status(500).json({ success: false, error: 'Authentication failed.' });
+    }
+}
+
+app.post('/api/login', handleAuth);
+app.post('/api/auth', handleAuth);
 
 // --- TODOS ---
 app.get('/api/todos/:email', (req, res) => {
@@ -101,6 +198,10 @@ app.delete('/api/todos/:id', (req, res) => {
 app.patch('/api/todos/:id', (req, res) => {
     const { completed } = req.body;
     db.run("UPDATE todos SET completed = ? WHERE id = ?", [completed ? 1 : 0, req.params.id], () => res.json({ success: true }));
+});
+
+app.patch('/api/todos/:id/reminder-sent', (req, res) => {
+    db.run("UPDATE todos SET reminderSent = 1 WHERE id = ?", [req.params.id], () => res.json({ success: true }));
 });
 
 // --- ASSIGNMENTS ---

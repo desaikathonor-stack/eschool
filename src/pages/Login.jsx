@@ -1,8 +1,75 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { GraduationCap, User, BookOpen, Mail, Lock, ArrowRight } from 'lucide-react';
 import API_BASE_URL from '../utils/api';
+import './Login.css';
+
+const DUMMY_USERS_KEY = 'eschool_dummy_users';
+
+function getDummyUsers() {
+    const seeded = {
+        'student@eschool.com': {
+            email: 'student@eschool.com',
+            password: 'demo123',
+            name: 'Demo Student',
+            role: 'student'
+        },
+        'teacher@eschool.com': {
+            email: 'teacher@eschool.com',
+            password: 'demo123',
+            name: 'Demo Teacher',
+            role: 'teacher'
+        }
+    };
+
+    try {
+        const stored = localStorage.getItem(DUMMY_USERS_KEY);
+        if (!stored) {
+            localStorage.setItem(DUMMY_USERS_KEY, JSON.stringify(seeded));
+            return seeded;
+        }
+
+        return { ...seeded, ...JSON.parse(stored) };
+    } catch {
+        localStorage.setItem(DUMMY_USERS_KEY, JSON.stringify(seeded));
+        return seeded;
+    }
+}
+
+function setDummyUsers(users) {
+    localStorage.setItem(DUMMY_USERS_KEY, JSON.stringify(users));
+}
+
+async function runDummyAuth({ email, password, name, role, action }) {
+    const users = getDummyUsers();
+    const user = users[email];
+
+    if (action === 'signup') {
+        if (user) {
+            throw new Error('User already exists in local demo mode. Please log in.');
+        }
+
+        const createdUser = {
+            email,
+            password,
+            name: name?.trim() || email.split('@')[0],
+            role: role === 'teacher' ? 'teacher' : 'student'
+        };
+        users[email] = createdUser;
+        setDummyUsers(users);
+        return { success: true, user: createdUser, source: 'dummy' };
+    }
+
+    if (!user) {
+        throw new Error('User not found in local demo mode. Please sign up first.');
+    }
+    if (user.password !== password) {
+        throw new Error('Incorrect password for local demo mode.');
+    }
+
+    return { success: true, user, source: 'dummy' };
+}
 
 export default function Login() {
     const [isLogin, setIsLogin] = useState(true);
@@ -12,82 +79,134 @@ export default function Login() {
     const [password, setPassword] = useState('');
     const [name, setName] = useState('');
     const [error, setError] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const navigate = useNavigate();
+    const reduceMotion = useReducedMotion();
 
-    const handleNext = (e) => {
+    const animation = useMemo(() => {
+        if (reduceMotion) {
+            return {
+                page: { initial: { opacity: 1 }, animate: { opacity: 1 }, transition: { duration: 0 } },
+                step: { initial: { opacity: 1 }, animate: { opacity: 1 }, exit: { opacity: 1 }, transition: { duration: 0 } }
+            };
+        }
+
+        return {
+            page: { initial: { opacity: 0, y: 16 }, animate: { opacity: 1, y: 0 }, transition: { duration: 0.32, ease: 'easeOut' } },
+            step: { initial: { opacity: 0, x: -10 }, animate: { opacity: 1, x: 0 }, exit: { opacity: 0, x: 10 }, transition: { duration: 0.2 } }
+        };
+    }, [reduceMotion]);
+
+    const handleNext = async (e) => {
         e.preventDefault();
         setError('');
         if (step === 1) {
             setStep(2);
         } else {
-            // SYNC with the Central Database
-          fetch(`${API_BASE_URL}/login`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password, name, role })
-            })
-                .then(res => res.json())
-                .then(data => {
-                    localStorage.setItem('eschool_current_user', email);
-                    if (role === 'student') navigate('/student');
-                    else navigate('/teacher');
-                });
+            const normalizedEmail = email.trim().toLowerCase();
+            const payload = {
+                email: normalizedEmail,
+                password,
+                name,
+                role,
+                action: isLogin ? 'login' : 'signup'
+            };
 
+            if (!normalizedEmail || !password || (!isLogin && !name.trim())) {
+                setError('Please complete all required fields.');
+                return;
+            }
+
+            setIsSubmitting(true);
+            try {
+                const controller = new AbortController();
+                const timeout = setTimeout(() => controller.abort(), 7000);
+
+                let data;
+                try {
+                    const res = await fetch(`${API_BASE_URL}/auth`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                        signal: controller.signal
+                    });
+                    data = await res.json();
+                    if (!res.ok || !data.success) {
+                        throw new Error(data.error || 'Authentication failed.');
+                    }
+                } catch (apiError) {
+                    data = await runDummyAuth(payload);
+                    localStorage.setItem('eschool_auth_mode', 'dummy');
+                } finally {
+                    clearTimeout(timeout);
+                }
+
+                localStorage.setItem('eschool_current_user', data.user.email);
+                localStorage.setItem('eschool_current_role', data.user.role);
+                if (data.user.role === 'teacher') {
+                    navigate('/teacher');
+                } else {
+                    navigate('/student');
+                }
+            } catch (err) {
+                setError(err.message || 'Unable to continue. Please try again.');
+            } finally {
+                setIsSubmitting(false);
+            }
         }
     };
 
     return (
-        <div className="flex-center" style={{ minHeight: '100vh', padding: '1rem' }}>
+        <div className="auth-shell">
             <motion.div
-                initial={{ opacity: 0, y: 30 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.5, ease: 'easeOut' }}
-                className="glass-panel"
-                style={{ width: '100%', maxWidth: '440px', padding: '2.5rem', position: 'relative', overflow: 'hidden' }}
+                initial={animation.page.initial}
+                animate={animation.page.animate}
+                transition={animation.page.transition}
+                className="auth-card"
             >
-                <div style={{ position: 'absolute', top: '-50px', right: '-50px', background: 'var(--primary)', width: '100px', height: '100px', borderRadius: '50%', filter: 'blur(50px)', opacity: 0.5 }} />
-                <div style={{ position: 'absolute', bottom: '-50px', left: '-50px', background: 'var(--secondary)', width: '100px', height: '100px', borderRadius: '50%', filter: 'blur(50px)', opacity: 0.5 }} />
+                <div className="auth-glow auth-glow-top" />
+                <div className="auth-glow auth-glow-bottom" />
 
-                <div style={{ textAlign: 'center', marginBottom: '2rem', position: 'relative', zIndex: 1 }}>
-                    <BookOpen size={48} color="var(--primary)" style={{ margin: '0 auto 1rem' }} />
-                    <h1 className="text-gradient" style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>E-School Pro</h1>
-                    <p style={{ color: 'var(--text-muted)' }}>{isLogin ? 'Welcome back to your adaptive learning path.' : 'Start your adaptive learning journey.'}</p>
+                <div className="auth-header">
+                    <BookOpen size={42} color="#14b8a6" />
+                    <h1>E-School Pro</h1>
+                    <p>{isLogin ? 'Welcome back. Continue where you left off.' : 'Create your account and get started quickly.'}</p>
                 </div>
 
-                <form onSubmit={handleNext} style={{ position: 'relative', zIndex: 1, display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                <form onSubmit={handleNext} className="auth-form">
                     <AnimatePresence mode="wait">
                         {step === 1 && (
                             <motion.div
                                 key="step1"
-                                initial={{ opacity: 0, x: -20 }}
-                                animate={{ opacity: 1, x: 0 }}
-                                exit={{ opacity: 0, x: 20 }}
-                                transition={{ duration: 0.3 }}
-                                style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}
+                                initial={animation.step.initial}
+                                animate={animation.step.animate}
+                                exit={animation.step.exit}
+                                transition={animation.step.transition}
+                                className="auth-step"
                             >
-                                <div style={{ display: 'flex', background: 'var(--glass-border)', borderRadius: '8px', padding: '4px' }}>
+                                <div className="auth-segment">
                                     <button
                                         type="button"
                                         onClick={() => setRole('student')}
-                                        style={{ flex: 1, padding: '10px', borderRadius: '6px', background: role === 'student' ? 'var(--primary)' : 'transparent', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                                        className={role === 'student' ? 'selected' : ''}
                                     >
                                         <User size={18} /> Student
                                     </button>
                                     <button
                                         type="button"
                                         onClick={() => setRole('teacher')}
-                                        style={{ flex: 1, padding: '10px', borderRadius: '6px', background: role === 'teacher' ? 'var(--primary)' : 'transparent', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                                        className={role === 'teacher' ? 'selected' : ''}
                                     >
                                         <GraduationCap size={18} /> Teacher
                                     </button>
                                 </div>
 
-                                <div style={{ display: 'flex', justifyContent: 'center', gap: '1rem', marginTop: '1rem' }}>
-                                    <button type="button" onClick={() => setIsLogin(true)} style={{ color: isLogin ? 'var(--primary)' : 'var(--text-muted)', fontWeight: isLogin ? 600 : 400, borderBottom: isLogin ? '2px solid var(--primary)' : '2px solid transparent', paddingBottom: '4px' }}>Login</button>
-                                    <button type="button" onClick={() => setIsLogin(false)} style={{ color: !isLogin ? 'var(--primary)' : 'var(--text-muted)', fontWeight: !isLogin ? 600 : 400, borderBottom: !isLogin ? '2px solid var(--primary)' : '2px solid transparent', paddingBottom: '4px' }}>Sign Up</button>
+                                <div className="auth-tabs">
+                                    <button type="button" onClick={() => setIsLogin(true)} className={isLogin ? 'active' : ''}>Login</button>
+                                    <button type="button" onClick={() => setIsLogin(false)} className={!isLogin ? 'active' : ''}>Sign Up</button>
                                 </div>
 
-                                <button type="submit" className="btn-primary" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginTop: '1rem' }}>
+                                <button type="submit" className="btn-primary auth-primary-btn" disabled={isSubmitting}>
                                     Continue <ArrowRight size={18} />
                                 </button>
                             </motion.div>
@@ -96,36 +215,36 @@ export default function Login() {
                         {step === 2 && (
                             <motion.div
                                 key="step2"
-                                initial={{ opacity: 0, x: -20 }}
-                                animate={{ opacity: 1, x: 0 }}
-                                exit={{ opacity: 0, x: 20 }}
-                                transition={{ duration: 0.3 }}
-                                style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}
+                                initial={animation.step.initial}
+                                animate={animation.step.animate}
+                                exit={animation.step.exit}
+                                transition={animation.step.transition}
+                                className="auth-step auth-step-tight"
                             >
                                 {error && (
-                                    <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} style={{ padding: '10px', background: 'rgba(239, 68, 68, 0.2)', color: '#fca5a5', borderRadius: '8px', fontSize: '0.9rem', textAlign: 'center', border: '1px solid rgba(239, 68, 68, 0.5)' }}>
+                                    <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} className="auth-error">
                                         {error}
                                     </motion.div>
                                 )}
-                                <div style={{ position: 'relative' }}>
-                                    <Mail size={18} style={{ position: 'absolute', top: '14px', left: '16px', color: 'var(--text-muted)' }} />
-                                    <input type="email" placeholder="Email Address" required className="input-base" style={{ paddingLeft: '44px' }} value={email} onChange={(e) => setEmail(e.target.value)} />
+                                <div className="auth-input-wrap">
+                                    <Mail size={18} className="auth-input-icon" />
+                                    <input type="email" placeholder="Email Address" required className="input-base auth-input" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
                                 </div>
                                 {!isLogin && (
-                                    <div style={{ position: 'relative' }}>
-                                        <User size={18} style={{ position: 'absolute', top: '14px', left: '16px', color: 'var(--text-muted)' }} />
-                                        <input type="text" placeholder="Full Name" required className="input-base" style={{ paddingLeft: '44px' }} value={name} onChange={(e) => setName(e.target.value)} />
+                                    <div className="auth-input-wrap">
+                                        <User size={18} className="auth-input-icon" />
+                                        <input type="text" placeholder="Full Name" required className="input-base auth-input" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
                                     </div>
                                 )}
-                                <div style={{ position: 'relative' }}>
-                                    <Lock size={18} style={{ position: 'absolute', top: '14px', left: '16px', color: 'var(--text-muted)' }} />
-                                    <input type="password" placeholder="Password" required className="input-base" style={{ paddingLeft: '44px' }} value={password} onChange={(e) => setPassword(e.target.value)} />
+                                <div className="auth-input-wrap">
+                                    <Lock size={18} className="auth-input-icon" />
+                                    <input type="password" placeholder="Password" required className="input-base auth-input" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete={isLogin ? 'current-password' : 'new-password'} />
                                 </div>
 
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem' }}>
-                                    <button type="button" onClick={() => { setStep(1); setError(''); }} style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Back</button>
-                                    <button type="submit" className="btn-primary" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                                        {isLogin ? 'Enter Dashboard' : 'Create Account'} <ArrowRight size={18} />
+                                <div className="auth-footer">
+                                    <button type="button" onClick={() => { setStep(1); setError(''); }} className="auth-back-btn" disabled={isSubmitting}>Back</button>
+                                    <button type="submit" className="btn-primary auth-primary-btn" disabled={isSubmitting}>
+                                        {isSubmitting ? 'Working...' : isLogin ? 'Enter Dashboard' : 'Create Account'} <ArrowRight size={18} />
                                     </button>
                                 </div>
                             </motion.div>

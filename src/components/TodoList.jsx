@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { Plus, Check, Trash2, Calendar, Bell, Mail, Send, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { Plus, Check, Trash2, Bell, Mail, CheckCircle2 } from 'lucide-react';
+import API_BASE_URL from '../utils/api';
 
 export default function TodoList() {
     const [todos, setTodos] = useState([]);
@@ -9,11 +10,13 @@ export default function TodoList() {
 
 
     const todosRef = useRef(todos);
+    const reminderTimerRef = useRef(null);
+    const alertTimerRef = useRef(null);
     const currentUserEmail = localStorage.getItem('eschool_current_user') || 'student@eschool.com';
 
     // 1. DATA SYNC: Fetch all todos from the server on load
     useEffect(() => {
-        fetch(`http://localhost:5000/api/todos/${currentUserEmail}`)
+        fetch(`${API_BASE_URL}/todos/${currentUserEmail}`)
             .then(res => res.json())
             .then(data => {
                 setTodos(data);
@@ -35,20 +38,43 @@ export default function TodoList() {
     }, [todos]);
 
     useEffect(() => {
-        const interval = setInterval(() => {
-            const now = new Date();
-            todosRef.current.forEach(todo => {
-                if (todo.reminder && !todo.completed && !todo.reminderSent) {
-                    const rTime = new Date(todo.reminder);
-                    // Check if it's time to trigger (with a 5 second tolerance for the interval sync)
-                    if (now >= rTime) {
-                        triggerLocalNotification(todo);
-                    }
-                }
-            });
-        }, 1000); // Check every second for better responsiveness
+        const pending = todos
+            .filter(todo => todo.reminder && !todo.completed && !todo.reminderSent)
+            .map(todo => ({ ...todo, reminderTs: new Date(todo.reminder).getTime() }))
+            .filter(todo => Number.isFinite(todo.reminderTs))
+            .sort((a, b) => a.reminderTs - b.reminderTs);
 
-        return () => clearInterval(interval);
+        if (reminderTimerRef.current) {
+            clearTimeout(reminderTimerRef.current);
+        }
+
+        if (!pending.length) {
+            return undefined;
+        }
+
+        const nextTodo = pending[0];
+        const delayMs = Math.max(0, nextTodo.reminderTs - Date.now());
+
+        reminderTimerRef.current = setTimeout(() => {
+            triggerLocalNotification(nextTodo);
+        }, Math.min(delayMs, 2147483647));
+
+        return () => {
+            if (reminderTimerRef.current) {
+                clearTimeout(reminderTimerRef.current);
+            }
+        };
+    }, [todos]);
+
+    useEffect(() => {
+        return () => {
+            if (alertTimerRef.current) {
+                clearTimeout(alertTimerRef.current);
+            }
+            if (reminderTimerRef.current) {
+                clearTimeout(reminderTimerRef.current);
+            }
+        };
     }, []);
 
     const triggerLocalNotification = (todo) => {
@@ -71,11 +97,17 @@ export default function TodoList() {
             time: new Date().toLocaleTimeString()
         });
 
-        setTimeout(() => setActiveAlert(null), 8000);
+        if (alertTimerRef.current) {
+            clearTimeout(alertTimerRef.current);
+        }
+        alertTimerRef.current = setTimeout(() => setActiveAlert(null), 8000);
 
 
         // 4. Sync local state to match server (mark as sent locally)
         setTodos(prev => prev.map(t => t.id === todo.id ? { ...t, reminderSent: true } : t));
+
+        fetch(`${API_BASE_URL}/todos/${todo.id}/reminder-sent`, { method: 'PATCH' })
+            .catch(err => console.error('Failed to sync reminder status:', err));
     };
 
 
@@ -91,14 +123,14 @@ export default function TodoList() {
         };
 
         // SAVE TO THE SERVER (Permanent storage)
-        fetch('http://localhost:5000/api/todos', {
+        fetch(`${API_BASE_URL}/todos`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(newTask)
         })
             .then(res => res.json())
             .then(savedTodo => {
-                setTodos([savedTodo, ...todos]);
+                setTodos(prev => [savedTodo, ...prev]);
                 setNewTodo('');
                 setReminderTime('');
             });
@@ -106,20 +138,20 @@ export default function TodoList() {
 
     const toggleTodo = (id) => {
         const t = todos.find(t => t.id === id);
-        fetch(`http://localhost:5000/api/todos/${id}`, {
+        fetch(`${API_BASE_URL}/todos/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ completed: !t.completed })
         })
             .then(() => {
-                setTodos(todos.map(t => t.id === id ? { ...t, completed: !t.completed } : t));
+                setTodos(prev => prev.map(todo => todo.id === id ? { ...todo, completed: !todo.completed } : todo));
             });
     };
 
     const deleteTodo = (id) => {
-        fetch(`http://localhost:5000/api/todos/${id}`, { method: 'DELETE' })
+        fetch(`${API_BASE_URL}/todos/${id}`, { method: 'DELETE' })
             .then(() => {
-                setTodos(todos.filter(t => t.id !== id));
+                setTodos(prev => prev.filter(todo => todo.id !== id));
             });
     };
 
