@@ -1,3 +1,4 @@
+const { sendReminderEmail } = require('./emailService');
 const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: path.join(__dirname, '../.env') });
@@ -507,41 +508,30 @@ function getSql(sql, params = []) {
 
 // 3. BACKGROUND SCHEDULER
 cron.schedule('* * * * *', async () => {
-    console.log('[WORKER] Scanning for pending reminders...');
     const now = new Date().toISOString();
 
-    db.all("SELECT * FROM todos WHERE reminderSent = 0 AND reminder IS NOT NULL AND reminder <= ?", [now], async (err, rows) => {
-        if (err) return console.error(err);
+    db.all(
+        "SELECT * FROM todos WHERE reminderSent = 0 AND reminder IS NOT NULL AND reminder <= ?",
+        [now],
+        async (err, rows) => {
+            if (err) return console.error('[CRON] DB error:', err);
 
-        if (rows.length > 0) {
-            const serviceID = process.env.VITE_EMAILJS_SERVICE_ID;
-            const templateID = process.env.VITE_EMAILJS_TEMPLATE_ID;
-            const publicKey = process.env.VITE_EMAILJS_PUBLIC_KEY;
-
-            rows.forEach(todo => {
-                if (serviceID && templateID && publicKey) {
-                    emailjs.send(serviceID, templateID, {
-                        to_email: todo.user_email,
-                        task_name: todo.text,
-                        message: `This is your automated reminder to complete: ${todo.text}`
-                    }, {
-                        publicKey: publicKey
-                    })
-                        .then((response) => {
-                            console.log(`[WORKER] EmailJS reminder sent for: ${todo.text}`, response.status);
-                            db.run("UPDATE todos SET reminderSent = 1 WHERE id = ?", [todo.id]);
-                        })
-                        .catch((error) => {
-                            console.error("[WORKER] EmailJS error:", error);
-                            db.run("UPDATE todos SET reminderSent = 1 WHERE id = ?", [todo.id]); // Prevent loop
-                        });
-                } else {
-                    console.error("[WORKER] EmailJS keys missing from .env");
-                    db.run("UPDATE todos SET reminderSent = 1 WHERE id = ?", [todo.id]);
+            for (const todo of rows) {
+                try {
+                    await sendReminderEmail(
+                        todo.user_email,
+                        todo.text,
+                        new Date(todo.reminder).toLocaleString()
+                    );
+                    console.log(`[CRON] Email sent to ${todo.user_email} for: ${todo.text}`);
+                } catch (emailErr) {
+                    console.error(`[CRON] Email failed for todo ${todo.id}:`, emailErr.message);
                 }
-            });
+                // Mark as sent whether email succeeded or failed (prevents retry loop)
+                db.run("UPDATE todos SET reminderSent = 1 WHERE id = ?", [todo.id]);
+            }
         }
-    });
+    );
 });
 
 // 4. API ENDPOINTS
