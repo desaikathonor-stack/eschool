@@ -1,7 +1,9 @@
 const { sendReminderEmail } = require('./emailService');
 const path = require('path');
 const fs = require('fs');
-require('dotenv').config();
+if (process.env.NODE_ENV !== 'production') {
+    require('dotenv').config();
+}
 const express = require('express');
 const cors = require('cors');
 const sqlite3 = require('sqlite3').verbose();
