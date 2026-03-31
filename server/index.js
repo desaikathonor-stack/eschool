@@ -519,7 +519,10 @@ cron.schedule('* * * * *', async () => {
             if (err) return console.error('[CRON] DB error:', err);
             
             console.log('[CRON] All todos with reminders:', JSON.stringify(rows.map(r => ({id: r.id, reminder: r.reminder, reminderSent: r.reminderSent}))));
-            const due = rows.filter(todo => new Date(todo.reminder) <= now);
+           const due = rows.filter(todo => {
+    const reminderDate = new Date(todo.reminder + ':00+05:30');
+    return reminderDate <= now;
+});
             console.log('[CRON] Pending reminders found:', due.length);
 
             for (const todo of due) {
