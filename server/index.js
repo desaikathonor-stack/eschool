@@ -143,11 +143,42 @@ function resolveTargetMatch(difficulty, explicitTarget) {
 
 const EXTERNAL_AI_BASE_URL = (process.env.EXTERNAL_AI_BASE_URL || 'https://api.openai.com/v1').replace(/\/$/, '');
 const EXTERNAL_AI_API_KEY = process.env.EXTERNAL_AI_API_KEY || '';
-const EXTERNAL_AI_MODEL_1 = process.env.EXTERNAL_AI_MODEL_1 || 'gpt-4o-mini';
-const EXTERNAL_AI_MODEL_2 = process.env.EXTERNAL_AI_MODEL_2 || 'gpt-4.1-mini';
+const IS_GOOGLE_GENERATIVE_API = /generativelanguage\.googleapis\.com/i.test(EXTERNAL_AI_BASE_URL);
+const EXTERNAL_AI_MODEL_1 = process.env.EXTERNAL_AI_MODEL_1 || (IS_GOOGLE_GENERATIVE_API ? 'gemini-2.0-flash' : 'gpt-4o-mini');
+const EXTERNAL_AI_MODEL_2 = process.env.EXTERNAL_AI_MODEL_2 || (IS_GOOGLE_GENERATIVE_API ? 'gemini-1.5-flash-latest' : 'gpt-4.1-mini');
+
+const GEMINI_MODEL_FALLBACKS = [
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro-latest'
+];
 
 function ensureExternalAIConfigured() {
     return Boolean(EXTERNAL_AI_API_KEY);
+}
+
+function getModelCandidates(primaryModel) {
+    const candidateSet = new Set();
+    const normalizedPrimary = String(primaryModel || '').trim();
+    if (normalizedPrimary) {
+        candidateSet.add(normalizedPrimary);
+
+        // Gemini model aliases can differ by "-latest" suffix between API releases.
+        if (normalizedPrimary.startsWith('gemini-')) {
+            if (normalizedPrimary.endsWith('-latest')) {
+                candidateSet.add(normalizedPrimary.replace(/-latest$/, ''));
+            } else {
+                candidateSet.add(`${normalizedPrimary}-latest`);
+            }
+        }
+    }
+
+    if (IS_GOOGLE_GENERATIVE_API) {
+        GEMINI_MODEL_FALLBACKS.forEach(model => candidateSet.add(model));
+    }
+
+    return Array.from(candidateSet).filter(Boolean);
 }
 
 function parseAiScoreContent(rawText) {
@@ -203,64 +234,88 @@ async function scoreWithExternalAI({ model, studentAnswer, answerKey, contextLab
         throw new Error('External AI is not configured. Set EXTERNAL_AI_API_KEY in server environment.');
     }
 
+    const modelCandidates = getModelCandidates(model);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 25000);
 
     try {
-        const url = `${EXTERNAL_AI_BASE_URL}/models/${model}:generateContent?key=${EXTERNAL_AI_API_KEY}`;
-        console.log('[AI DEBUG] Request URL:', url.replace(EXTERNAL_AI_API_KEY, '***KEY***'));
-        console.log('[AI DEBUG] Base URL:', EXTERNAL_AI_BASE_URL);
-        console.log('[AI DEBUG] Model:', model);
-        
-        const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                system_instruction: {
-                    parts: {
-                        text: 'You are a strict academic evaluator. Return JSON only with keys: score (0-100 number), feedback (short string).'
-                    }
-                },
-                contents: [
-                    {
-                        role: 'user',
-                        parts: [
-                            {
-                                text: [
-                                    `Context: ${contextLabel}`,
-                                    'Evaluate the student answer against the answer key.',
-                                    'Scoring rules: semantic correctness, coverage of key points, accuracy, and clarity.',
-                                    'Return only JSON object: {"score": <0-100>, "feedback": "..."}.',
-                                    `Answer Key:\n${String(answerKey || '').slice(0, 8000)}`,
-                                    `Student Answer:\n${String(studentAnswer || '').slice(0, 8000)}`
-                                ].join('\n\n')
-                            }
-                        ]
-                    }
-                ],
-                generationConfig: {
-                    temperature: 0.1,
-                    topK: 40,
-                    topP: 0.95
-                }
-            }),
-            signal: controller.signal
-        });
+        let lastError = null;
 
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`External AI request failed (${response.status}): ${errorText.slice(0, 300)}`);
+        for (const candidateModel of modelCandidates) {
+            const url = `${EXTERNAL_AI_BASE_URL}/models/${candidateModel}:generateContent?key=${EXTERNAL_AI_API_KEY}`;
+            console.log('[AI DEBUG] Request URL:', url.replace(EXTERNAL_AI_API_KEY, '***KEY***'));
+            console.log('[AI DEBUG] Base URL:', EXTERNAL_AI_BASE_URL);
+            console.log('[AI DEBUG] Model:', candidateModel);
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    system_instruction: {
+                        parts: {
+                            text: 'You are a strict academic evaluator. Return JSON only with keys: score (0-100 number), feedback (short string).'
+                        }
+                    },
+                    contents: [
+                        {
+                            role: 'user',
+                            parts: [
+                                {
+                                    text: [
+                                        `Context: ${contextLabel}`,
+                                        'Evaluate the student answer against the answer key.',
+                                        'Scoring rules: semantic correctness, coverage of key points, accuracy, and clarity.',
+                                        'Return only JSON object: {"score": <0-100>, "feedback": "..."}.',
+                                        `Answer Key:\n${String(answerKey || '').slice(0, 8000)}`,
+                                        `Student Answer:\n${String(studentAnswer || '').slice(0, 8000)}`
+                                    ].join('\n\n')
+                                }
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        temperature: 0.1,
+                        topK: 40,
+                        topP: 0.95
+                    }
+                }),
+                signal: controller.signal
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                const modelNotFound = response.status === 404 && /NOT_FOUND|not found|ListModels/i.test(errorText);
+                const requestError = new Error(`External AI request failed (${response.status}): ${errorText.slice(0, 300)}`);
+                requestError.modelNotFound = modelNotFound;
+                requestError.model = candidateModel;
+                lastError = requestError;
+
+                if (modelNotFound) {
+                    console.warn(`[AI] Model ${candidateModel} not available. Trying next fallback model.`);
+                    continue;
+                }
+
+                throw requestError;
+            }
+
+            const payload = await response.json();
+            const rawContent = payload?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            const parsed = parseAiScoreContent(rawContent);
+            return {
+                score: Number(parsed.score.toFixed(2)),
+                feedback: parsed.feedback
+            };
         }
 
-        const payload = await response.json();
-        const rawContent = payload?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        const parsed = parseAiScoreContent(rawContent);
-        return {
-            score: Number(parsed.score.toFixed(2)),
-            feedback: parsed.feedback
-        };
+        if (lastError) {
+            throw new Error(
+                `External AI evaluation failed after trying models: ${modelCandidates.join(', ')}. Last error: ${lastError.message}`
+            );
+        }
+
+        throw new Error('External AI evaluation failed: no model candidates available.');
     } finally {
         clearTimeout(timeout);
     }
