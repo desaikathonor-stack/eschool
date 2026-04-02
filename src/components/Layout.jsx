@@ -11,6 +11,7 @@ export default function Layout({ children, role, activeTab, setActiveTab }) {
     const getTabs = () => {
         let base = [
             { id: 'home', icon: <LayoutDashboard size={20} />, label: 'Dashboard' },
+            { id: 'classrooms', icon: <Book size={20} />, label: 'Classrooms' },
             { id: 'notes', icon: <Edit size={20} />, label: 'Notes' },
             { id: 'todo', icon: <CheckSquare size={20} />, label: 'Todo' },
             { id: 'whiteboard', icon: <Edit3 size={20} />, label: 'Whiteboard' },
