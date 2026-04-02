@@ -76,12 +76,13 @@ export default function Education() {
     };
 
     const submitQuiz = () => {
-        let score = 0;
-        const totalMax = activeQuiz.questions.length;
+        let earnedMarks = 0;
+        const totalQuestions = activeQuiz.questions.length;
+        const maxMarks = parseInt(activeQuiz.max_marks) || 100;
 
         activeQuiz.questions.forEach((q, idx) => {
             if (q.type === 'descriptive') {
-                const matchPct = calculateKeywordMatchPercentage(answers[idx], q.answerKey);
+                const matchPct = calculateKeywordMatchPercentage(answers[idx] || '', q.answerKey);
 
                 let targetMatch = 85;
                 if (q.level === 'hard') targetMatch = 75;
@@ -89,16 +90,17 @@ export default function Education() {
                 else if (q.level === 'easy') targetMatch = 85;
 
                 if (matchPct >= targetMatch) {
-                    score += 1;
+                    earnedMarks += 1;
                 } else {
-                    let partial = (matchPct / targetMatch);
-                    score += partial;
+                    earnedMarks += (matchPct / targetMatch);
                 }
             } else {
-                if (answers[idx] === q.correct) score++;
+                if (answers[idx] === q.correct) earnedMarks += 1;
             }
         });
-        const percentage = Math.round((score / totalMax) * 100) + '%';
+
+        const finalScoreValue = (earnedMarks / totalQuestions) * maxMarks;
+        const scoreLabel = `${parseFloat(finalScoreValue.toFixed(2))} / ${maxMarks}`;
 
         fetch(`${API_BASE_URL}/attempts`, {
             method: 'POST',
@@ -107,7 +109,7 @@ export default function Education() {
                 quiz_id: activeQuiz.id,
                 quiz_title: activeQuiz.title,
                 student_email: currentUserEmail,
-                score: percentage,
+                score: scoreLabel,
                 showResultImmediately: activeQuiz.showResultImmediately,
                 quiz_type: activeQuiz.quizType || 'objective',
                 responses: answers

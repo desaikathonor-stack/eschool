@@ -7,7 +7,8 @@ export default function TeacherQuizSettings() {
     const [quizzes, setQuizzes] = useState([]);
     const [isCreating, setIsCreating] = useState(false);
     const [quizMode, setQuizMode] = useState('objective');
-    const [newQuiz, setNewQuiz] = useState({ title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, generalAnswerKeyFile: null });
+    const initialNewQuiz = { title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, immediateEmail: false, max_marks: 100, generalAnswerKeyFile: null };
+    const [quizState, setQuizState] = useState(initialNewQuiz);
     const [questionPaperFile, setQuestionPaperFile] = useState(null);
 
     const [questionsData, setQuestionsData] = useState(
@@ -58,7 +59,7 @@ export default function TeacherQuizSettings() {
 
     const handleGeneralFileChange = async (e) => {
         const file = e.target.files[0];
-        setNewQuiz({ ...newQuiz, generalAnswerKeyFile: file });
+        setQuizState({ ...quizState, generalAnswerKeyFile: file });
         if (file) {
             const text = await extractTextFromFile(file);
             setQuestionsData(prev => prev.map(q =>
@@ -93,7 +94,8 @@ export default function TeacherQuizSettings() {
         let count = parseInt(e.target.value) || 1;
         if (count > 50) count = 50;
 
-        setNewQuiz({ ...newQuiz, questionsCount: count });
+
+        setQuizState({ ...quizState, questionsCount: count });
 
         setQuestionsData(prev => {
             const newData = [...prev];
@@ -119,7 +121,7 @@ export default function TeacherQuizSettings() {
     const handleModeChange = (mode) => {
         const normalizedMode = mode === 'subjective' ? 'subjective' : 'objective';
         setQuizMode(normalizedMode);
-        setNewQuiz(prev => ({
+        setQuizState(prev => ({
             ...prev,
             showResultImmediately: normalizedMode === 'subjective' ? false : prev.showResultImmediately
         }));
@@ -195,12 +197,14 @@ export default function TeacherQuizSettings() {
         });
 
         const created = {
-            title: newQuiz.title,
-            module: newQuiz.module,
-            timeLimit: newQuiz.timeLimit,
+            title: quizState.title,
+            module: quizState.module,
+            timeLimit: quizState.timeLimit,
             quizType: quizMode,
             questions: normalizedQuestions,
-            showResultImmediately: quizMode === 'subjective' ? false : newQuiz.showResultImmediately
+            showResultImmediately: quizMode === 'subjective' ? false : quizState.showResultImmediately,
+            immediateEmail: quizState.immediateEmail,
+            max_marks: quizState.max_marks
         };
 
         if (questionPaperFile && !questionPaperFile.name.toLowerCase().endsWith('.pdf')) {
@@ -220,6 +224,8 @@ export default function TeacherQuizSettings() {
         formData.append('quizType', created.quizType);
         formData.append('questions', JSON.stringify(created.questions));
         formData.append('showResultImmediately', String(created.showResultImmediately));
+        formData.append('immediateEmail', String(created.immediateEmail));
+        formData.append('max_marks', String(created.max_marks));
         if (questionPaperFile) {
             formData.append('questionPaper', questionPaperFile);
         }
@@ -235,7 +241,7 @@ export default function TeacherQuizSettings() {
             setIsCreating(false);
             setQuizMode('objective');
             setQuestionPaperFile(null);
-            setNewQuiz({ title: '', module: 'Module 1', timeLimit: '30 mins', questionsCount: 5, showResultImmediately: true, generalAnswerKeyFile: null });
+            setQuizState(initialNewQuiz);
             setQuestionsData(Array.from({ length: 5 }, () => ({
                 q: '',
                 type: 'mcq',
@@ -260,6 +266,17 @@ export default function TeacherQuizSettings() {
     const handleSendMail = (attempt) => {
         const mailtoLink = `mailto:${attempt.student_email}?subject=Your Quiz Result&body=Hello,\n\nYou have taken the quiz "${attempt.quiz_title}" and scored: ${attempt.score}.\n\nBest Regards,\nTeacher`;
         window.location.href = mailtoLink;
+    };
+
+    const handleBulkEmail = async (quizId) => {
+        if (!window.confirm('This will send emails to all students who attempted this quiz. Continue?')) return;
+        try {
+            const res = await fetch(`${API_BASE_URL}/quizzes/${quizId}/email-results`, { method: 'POST' });
+            const data = await readApiPayload(res);
+            alert(`Emails successfully sent to ${data.count} students.`);
+        } catch (err) {
+            alert('Failed to send bulk emails: ' + err.message);
+        }
     };
 
     const handleEvaluateAttempt = async (attemptId) => {
@@ -319,13 +336,13 @@ export default function TeacherQuizSettings() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem', marginBottom: '2rem' }}>
                         <div>
                             <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Quiz Title</label>
-                            <input type="text" required value={newQuiz.title} onChange={e => setNewQuiz({ ...newQuiz, title: e.target.value })} className="input-base" placeholder="e.g. Advanced React Ecosystem" />
+                            <input type="text" required value={quizState.title} onChange={e => setQuizState({ ...quizState, title: e.target.value })} className="input-base" placeholder="e.g. Advanced React Ecosystem" />
                         </div>
 
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1.5rem' }}>
                             <div>
                                 <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Target Module</label>
-                                <select value={newQuiz.module} onChange={e => setNewQuiz({ ...newQuiz, module: e.target.value })} className="input-base" style={{ background: 'var(--bg-dark)' }}>
+                                <select value={quizState.module} onChange={e => setQuizState({ ...quizState, module: e.target.value })} className="input-base" style={{ background: 'var(--bg-dark)' }}>
                                     <option>Module 1 (Intro)</option>
                                     <option>Module 2 (HTML)</option>
                                     <option>Module 3 (CSS)</option>
@@ -337,11 +354,30 @@ export default function TeacherQuizSettings() {
                             </div>
                             <div>
                                 <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Time Limit</label>
-                                <input type="text" required value={newQuiz.timeLimit} onChange={e => setNewQuiz({ ...newQuiz, timeLimit: e.target.value })} className="input-base" placeholder="e.g. 30 mins" />
+                                <input type="text" required value={quizState.timeLimit} onChange={e => setQuizState({ ...quizState, timeLimit: e.target.value })} className="input-base" placeholder="e.g. 30 mins" />
                             </div>
                             <div>
                                 <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Number of Questions (1-50)</label>
-                                <input type="number" min="1" max="50" required value={newQuiz.questionsCount} onChange={handleCountChange} className="input-base" placeholder="10" />
+                                <input type="number" min="1" max="50" required value={quizState.questionsCount} onChange={handleCountChange} className="input-base" placeholder="10" />
+                            </div>
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: '1.5rem' }}>
+                            <div>
+                                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-muted)', fontSize: '0.9rem' }}>Maximum Marks for Quiz</label>
+                                <input type="number" min="1" required value={quizState.max_marks} onChange={e => setQuizState({ ...quizState, max_marks: e.target.value })} className="input-base" placeholder="100" />
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginTop: 'auto', paddingBottom: '12px' }}>
+                                <input
+                                    type="checkbox"
+                                    id="immediateEmailOption"
+                                    checked={quizState.immediateEmail}
+                                    onChange={e => setQuizState({ ...quizState, immediateEmail: e.target.checked })}
+                                    style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+                                />
+                                <label htmlFor="immediateEmailOption" style={{ cursor: 'pointer', color: 'var(--text-main)', fontSize: '0.95rem' }}>
+                                    Immediately send results email to student upon completion
+                                </label>
                             </div>
                         </div>
 
@@ -406,8 +442,8 @@ export default function TeacherQuizSettings() {
                                 <input
                                     type="checkbox"
                                     id="showResultOption"
-                                    checked={newQuiz.showResultImmediately}
-                                    onChange={e => setNewQuiz({ ...newQuiz, showResultImmediately: e.target.checked })}
+                                    checked={quizState.showResultImmediately}
+                                    onChange={e => setQuizState({ ...quizState, showResultImmediately: e.target.checked })}
                                     disabled={quizMode === 'subjective'}
                                     style={{ width: '18px', height: '18px', cursor: 'pointer' }}
                                 />
@@ -426,7 +462,7 @@ export default function TeacherQuizSettings() {
                     </div>
 
                     <div style={{ borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '2rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-                        <h4 style={{ color: 'var(--text-main)', fontSize: '1.1rem' }}>Define {newQuiz.questionsCount} Questions:</h4>
+                        <h4 style={{ color: 'var(--text-main)', fontSize: '1.1rem' }}>Define {quizState.questionsCount} Questions:</h4>
 
                         {questionsData.map((qData, index) => (
                             <div key={index} style={{ padding: '1.5rem', background: 'rgba(0,0,0,0.2)', borderRadius: '8px', border: '1px solid var(--border-color)' }}>
@@ -462,7 +498,7 @@ export default function TeacherQuizSettings() {
                                 ) : (
                                     <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
                                         <label style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Descriptive Answer Key (used for % matching):</label>
-                                        <textarea required={!qData.answerKeyFile && !newQuiz.generalAnswerKeyFile} value={qData.answerKey} onChange={e => updateQuestionField(index, 'answerKey', e.target.value)} className="input-base" placeholder="Enter keywords or the ideal answer used for evaluating the student's submission." style={{ resize: 'vertical', minHeight: '60px' }} />
+                                        <textarea required={!qData.answerKeyFile && !quizState.generalAnswerKeyFile} value={qData.answerKey} onChange={e => updateQuestionField(index, 'answerKey', e.target.value)} className="input-base" placeholder="Enter keywords or the ideal answer used for evaluating the student's submission." style={{ resize: 'vertical', minHeight: '60px' }} />
 
                                         <div style={{ marginTop: '0.5rem' }}>
                                             <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '4px', display: 'block' }}>Or add a file as answer key for this specific question:</label>
@@ -500,7 +536,10 @@ export default function TeacherQuizSettings() {
 
                             <div style={{ display: 'flex', gap: '1rem', marginTop: 'auto', paddingTop: '1rem', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
                                 <button onClick={() => unpublish(quiz.id)} style={{ flex: 1, padding: '8px', borderRadius: '8px', background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', fontSize: '0.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                                    <Trash2 size={16} /> Unpublish/Delete
+                                    <Trash2 size={16} /> Delete
+                                </button>
+                                <button onClick={() => handleBulkEmail(quiz.id)} style={{ flex: 1.5, padding: '8px', borderRadius: '8px', background: 'rgba(99, 102, 241, 0.1)', color: 'var(--primary)', fontSize: '0.9rem', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', border: '1px solid rgba(99, 102, 241, 0.2)' }}>
+                                    <Mail size={16} /> Bulk Email Marks
                                 </button>
                             </div>
                         </div>

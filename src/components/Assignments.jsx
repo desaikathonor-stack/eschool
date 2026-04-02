@@ -29,7 +29,7 @@ export default function Assignments({ role }) {
     // Curve Grading state
     const [curveSettings, setCurveSettings] = useState({});
 
-    const currentUserEmail = localStorage.getItem('eschool_current_user') || 'anonymous_student';
+    const currentUserEmail = localStorage.getItem('eschool_current_user');
     const apiBaseOrigin = API_BASE_URL.replace('/api', '');
 
     const readJsonSafely = async (response) => {
@@ -167,6 +167,10 @@ export default function Assignments({ role }) {
     };
 
     const handeSubmitAssignment = async (assignmentId) => {
+        if (role !== 'student') {
+            alert('Teachers cannot submit student work.');
+            return;
+        }
         if (!studentFile) {
             setUploadError('Please select a file to upload.');
             return;
@@ -174,6 +178,11 @@ export default function Assignments({ role }) {
 
         const assignment = assignments.find(a => a.id === assignmentId);
         if (!assignment) return;
+        
+        if (!currentUserEmail) {
+            setUploadError('User session not found. Please log in.');
+            return;
+        }
 
         const now = new Date();
         const due = assignment.dueDate ? new Date(assignment.dueDate) : null;

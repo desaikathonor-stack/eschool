@@ -7,6 +7,7 @@ const Whiteboard = lazy(() => import('../components/Whiteboard'));
 const TeacherQuizSettings = lazy(() => import('../components/TeacherQuizSettings'));
 const Assignments = lazy(() => import('../components/Assignments'));
 const Home = lazy(() => import('../components/Home'));
+const Classroom = lazy(() => import('../components/Classroom'));
 
 function TabLoader() {
     return (
@@ -18,6 +19,8 @@ function TabLoader() {
 
 export default function TeacherDashboard() {
     const [activeTab, setActiveTab] = useState('home');
+    const currentUserEmail = localStorage.getItem('eschool_current_user') || '';
+    const userName = localStorage.getItem('eschool_current_user') || '';
 
     return (
         <Layout role="teacher" activeTab={activeTab} setActiveTab={setActiveTab}>
@@ -28,6 +31,7 @@ export default function TeacherDashboard() {
                 {activeTab === 'whiteboard' && <Whiteboard />}
                 {activeTab === 'quizSettings' && <TeacherQuizSettings />}
                 {activeTab === 'assignments' && <Assignments role="teacher" />}
+                {activeTab === 'classrooms' && <Classroom currentUserEmail={currentUserEmail} userRole="teacher" userName={userName} />}
             </Suspense>
         </Layout>
     );

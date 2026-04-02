@@ -1,4 +1,12 @@
-const { sendReminderEmail } = require('./emailService');
+const {
+    sendReminderEmail,
+    sendAssignmentNotification,
+    sendQuizNotification,
+    sendSubmissionNotification,
+    sendGradingNotification,
+    sendClassroomTaskNotification,
+    sendClassroomWelcomeEmail
+} = require('./emailService');
 const path = require('path');
 const fs = require('fs');
 if (process.env.NODE_ENV !== 'production') {
@@ -82,6 +90,46 @@ const assignmentUpload = multer({
     fileFilter: (_req, file, cb) => {
         if (!isPdfOrDocxFile(file)) {
             return cb(new Error('Only PDF or DOCX files are allowed for assignments.'));
+        }
+        return cb(null, true);
+    }
+});
+
+// Classroom Assignment Storage - for assignments posted to classrooms
+const classroomAssignmentStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, assignmentPaperUploadDir),
+    filename: (_req, file, cb) => {
+        const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        cb(null, `${unique}-${sanitizeUploadName(file.originalname, 'assignment-file')}`);
+    }
+});
+
+const classroomAssignmentUpload = multer({
+    storage: classroomAssignmentStorage,
+    limits: { fileSize: 40 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        if (!isPdfOrDocxFile(file)) {
+            return cb(new Error('Only PDF or DOCX files are allowed.'));
+        }
+        return cb(null, true);
+    }
+});
+
+// Classroom Submission Storage - for student submissions
+const classroomSubmissionStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, assignmentSubmissionUploadDir),
+    filename: (_req, file, cb) => {
+        const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        cb(null, `${unique}-${sanitizeUploadName(file.originalname, 'submission')}`);
+    }
+});
+
+const classroomSubmissionUpload = multer({
+    storage: classroomSubmissionStorage,
+    limits: { fileSize: 40 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+        if (!isPdfOrDocxFile(file)) {
+            return cb(new Error('Only PDF or DOCX files are allowed for submissions.'));
         }
         return cb(null, true);
     }
@@ -339,6 +387,11 @@ db.serialize(() => {
     db.run("CREATE TABLE IF NOT EXISTS attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, quiz_id INTEGER, student_email TEXT, score TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS whiteboards (email TEXT PRIMARY KEY, slides_data TEXT)");
     db.run("CREATE TABLE IF NOT EXISTS saved_whiteboards (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, title TEXT, slides_data TEXT, created_at TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS classrooms (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, teacher_email TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS classroom_students (id INTEGER PRIMARY KEY AUTOINCREMENT, classroom_id INTEGER, student_email TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS classroom_assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, classroom_id INTEGER, title TEXT, dueDate TEXT, filePath TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS classroom_submissions (id INTEGER PRIMARY KEY AUTOINCREMENT, assignment_id INTEGER, student_email TEXT, filePath TEXT, fileName TEXT, marks TEXT)");
+    db.run("CREATE TABLE IF NOT EXISTS classroom_todos (id INTEGER PRIMARY KEY AUTOINCREMENT, classroom_id INTEGER, text TEXT, completed_by TEXT)");
     db.run("CREATE INDEX IF NOT EXISTS idx_todos_user_email ON todos(user_email)");
     db.run("CREATE INDEX IF NOT EXISTS idx_todos_reminder_pending ON todos(reminderSent, reminder)");
 
@@ -362,6 +415,16 @@ db.serialize(() => {
         if (!columnNames.has('quizType')) {
             db.run("ALTER TABLE quizzes ADD COLUMN quizType TEXT DEFAULT 'objective'", (alterErr) => {
                 if (alterErr) console.error('[DB] Failed adding quizType:', alterErr);
+            });
+        }
+        if (!columnNames.has('max_marks')) {
+            db.run("ALTER TABLE quizzes ADD COLUMN max_marks INTEGER DEFAULT 100", (alterErr) => {
+                if (alterErr) console.error('[DB] Failed adding max_marks:', alterErr);
+            });
+        }
+        if (!columnNames.has('immediateEmail')) {
+            db.run("ALTER TABLE quizzes ADD COLUMN immediateEmail BOOLEAN DEFAULT 0", (alterErr) => {
+                if (alterErr) console.error('[DB] Failed adding immediateEmail:', alterErr);
             });
         }
     });
@@ -864,6 +927,8 @@ app.get('/api/quizzes', (req, res) => {
             ...r,
             questions: JSON.parse(r.questions || '[]'),
             showResultImmediately: r.showResultImmediately === 1 || r.showResultImmediately === true,
+            immediateEmail: r.immediateEmail === 1 || r.immediateEmail === true,
+            max_marks: r.max_marks || 100,
             quizType: r.quizType || 'objective',
             questionPaperName: r.questionPaperName || null,
             questionPaperUrl: r.questionPaperPath ? `/uploads/question-papers/${r.questionPaperPath}` : null
@@ -881,6 +946,8 @@ app.post('/api/quizzes', quizPaperUpload.single('questionPaper'), (req, res) => 
         const questions = typeof rawQuestions === 'string' ? JSON.parse(rawQuestions) : rawQuestions;
         const quizType = String(req.body.quizType || 'objective') === 'subjective' ? 'subjective' : 'objective';
         const showResultImmediately = quizType === 'subjective' ? false : toBool(req.body.showResultImmediately);
+        const max_marks = parseInt(req.body.max_marks) || 100;
+        const immediateEmail = toBool(req.body.immediateEmail);
 
         if (!title || !module || !timeLimit || !Array.isArray(questions)) {
             return res.status(400).json({ error: 'Invalid quiz payload.' });
@@ -890,8 +957,8 @@ app.post('/api/quizzes', quizPaperUpload.single('questionPaper'), (req, res) => 
         const questionPaperName = req.file ? req.file.originalname : null;
 
         db.run(
-            "INSERT INTO quizzes (title, module, timeLimit, questions, showResultImmediately, questionPaperPath, questionPaperName, quizType) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            [title, module, timeLimit, JSON.stringify(questions), showResultImmediately ? 1 : 0, questionPaperPath, questionPaperName, quizType],
+            "INSERT INTO quizzes (title, module, timeLimit, questions, showResultImmediately, immediateEmail, max_marks, questionPaperPath, questionPaperName, quizType) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [title, module, timeLimit, JSON.stringify(questions), showResultImmediately ? 1 : 0, immediateEmail ? 1 : 0, max_marks, questionPaperPath, questionPaperName, quizType],
             function (err) {
                 if (err) return res.status(500).json({ error: err.message });
                 res.json({
@@ -900,7 +967,9 @@ app.post('/api/quizzes', quizPaperUpload.single('questionPaper'), (req, res) => 
                     module,
                     timeLimit,
                     questions,
+                    max_marks,
                     showResultImmediately: !!showResultImmediately,
+                    immediateEmail: !!immediateEmail,
                     quizType,
                     questionPaperName,
                     questionPaperUrl: questionPaperPath ? `/uploads/question-papers/${questionPaperPath}` : null
@@ -932,6 +1001,50 @@ app.delete('/api/quizzes/:id', (req, res) => {
     });
 });
 
+app.post('/api/quizzes/:id/email-results', async (req, res) => {
+    try {
+        const quizId = req.params.id;
+        const quiz = await getSql("SELECT * FROM quizzes WHERE id = ?", [quizId]);
+        if (!quiz) return res.status(404).json({ error: 'Quiz not found' });
+
+        const attempts = await new Promise((resolve, reject) => {
+            db.all("SELECT * FROM attempts WHERE quiz_id = ?", [quizId], (err, rows) => {
+                if (err) return reject(err);
+                resolve(rows || []);
+            });
+        });
+
+        if (attempts.length === 0) return res.json({ success: true, count: 0 });
+
+        const serviceID = process.env.VITE_EMAILJS_SERVICE_ID;
+        const templateID = process.env.VITE_EMAILJS_TEMPLATE_ID;
+        const publicKey = process.env.VITE_EMAILJS_PUBLIC_KEY;
+
+        if (!serviceID || !templateID || !publicKey) {
+            return res.status(500).json({ error: 'Email configuration missing on server.' });
+        }
+
+        let count = 0;
+        for (const attempt of attempts) {
+            try {
+                await emailjs.send(serviceID, templateID, {
+                    to_email: attempt.student_email,
+                    task_name: `Quiz Results: ${quiz.title}`,
+                    message: `Hello, here are your finalized results for the quiz "${quiz.title}". Final Score: ${attempt.score}.`
+                }, { publicKey });
+                count++;
+            } catch (e) {
+                console.error(`[BULK-EMAIL] Failed for ${attempt.student_email}:`, e);
+            }
+        }
+
+        res.json({ success: true, count });
+    } catch (error) {
+        console.error('[BULK-EMAIL] Error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // --- ATTEMPTS ---
 app.get('/api/attempts/:email', (req, res) => {
     db.all("SELECT * FROM attempts WHERE student_email = ?", [req.params.email], (err, rows) => {
@@ -951,24 +1064,28 @@ app.post('/api/attempts', (req, res) => {
         async function (err) {
         if (err) return res.status(500).json({ error: err.message });
 
-        if (!showResultImmediately && quizType !== 'subjective') {
-            const serviceID = process.env.VITE_EMAILJS_SERVICE_ID;
-            const templateID = process.env.VITE_EMAILJS_TEMPLATE_ID;
-            const publicKey = process.env.VITE_EMAILJS_PUBLIC_KEY;
+        // Handle immediate email if configured
+        db.get("SELECT immediateEmail, title FROM quizzes WHERE id = ?", [quiz_id], async (qErr, qRow) => {
+            if (!qErr && qRow && qRow.immediateEmail) {
+                const serviceID = process.env.VITE_EMAILJS_SERVICE_ID;
+                const templateID = process.env.VITE_EMAILJS_TEMPLATE_ID;
+                const publicKey = process.env.VITE_EMAILJS_PUBLIC_KEY;
 
-            if (serviceID && templateID && publicKey) {
-                try {
-                    await emailjs.send(serviceID, templateID, {
-                        to_email: student_email,
-                        task_name: `Quiz Results: ${quiz_title}`,
-                        message: `Congratulations! You have completed the quiz "${quiz_title}". Your achieved score is ${score}.`
-                    }, { publicKey: publicKey });
-                    console.log(`[QUIZ] Results emailed to ${student_email}`);
-                } catch (error) {
-                    console.error("[QUIZ] Email error:", error);
+                if (serviceID && templateID && publicKey) {
+                    try {
+                        await emailjs.send(serviceID, templateID, {
+                            to_email: student_email,
+                            task_name: `Quiz Results: ${qRow.title}`,
+                            message: `Congratulations! You have completed the quiz "${qRow.title}". Your achieved score is ${score}.`
+                        }, { publicKey: publicKey });
+                        console.log(`[QUIZ] Results emailed to ${student_email}`);
+                    } catch (error) {
+                        console.error("[QUIZ] Email error:", error);
+                    }
                 }
             }
-        }
+        });
+
         res.json({ success: true, id: this.lastID, evaluationStatus });
     });
 });
@@ -1136,6 +1253,295 @@ app.delete('/api/saved-whiteboards/:id', (req, res) => {
     db.run("DELETE FROM saved_whiteboards WHERE id = ?", [req.params.id], function (err) {
         if (err) return res.status(500).json({ error: err.message });
         res.json({ success: true });
+    });
+});
+
+// --- CLASSROOMS ---
+// Get classrooms for current user (teacher or student)
+app.get('/api/classrooms', (req, res) => {
+    const email = String(req.query.email || '').trim().toLowerCase();
+    if (!email) return res.status(400).json({ error: 'Email required' });
+    
+    db.all(
+        "SELECT c.* FROM classrooms c WHERE c.teacher_email = ? OR c.id IN (SELECT classroom_id FROM classroom_students WHERE student_email = ?)",
+        [email, email],
+        (err, rows) => res.json(rows || [])
+    );
+});
+
+// Create classroom (teacher only)
+app.post('/api/classrooms', (req, res) => {
+    const { name, teacher_email } = req.body;
+    db.run(
+        "INSERT INTO classrooms (name, teacher_email) VALUES (?, ?)",
+        [name, teacher_email],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ id: this.lastID, name, teacher_email });
+        }
+    );
+});
+
+// Delete classroom
+app.delete('/api/classrooms/:id', (req, res) => {
+    const { id } = req.params;
+    db.run("DELETE FROM classrooms WHERE id = ?", [id], function (err) {
+        if (err) return res.status(500).json({ error: err.message, success: false });
+        db.run("DELETE FROM classroom_students WHERE classroom_id = ?", [id]);
+        db.run("DELETE FROM classroom_assignments WHERE classroom_id = ?", [id]);
+        db.run("DELETE FROM classroom_todos WHERE classroom_id = ?", [id]);
+        res.json({ success: true });
+    });
+});
+
+// Get classroom assignments
+app.get('/api/classrooms/:id/assignments', (req, res) => {
+    db.all("SELECT * FROM classroom_assignments WHERE classroom_id = ?", [req.params.id], (err, rows) => {
+        res.json(rows || []);
+    });
+});
+
+// Create assignment
+app.post('/api/classrooms/:id/assignments', classroomAssignmentUpload.single('file'), (req, res) => {
+    const { title, dueDate } = req.body;
+    const filePath = req.file?.filename || null;
+    const classroomId = req.params.id;
+
+    db.run(
+        "INSERT INTO classroom_assignments (classroom_id, title, dueDate, filePath) VALUES (?, ?, ?, ?)",
+        [classroomId, title, dueDate, filePath],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // Get classroom name and students for email notification
+            db.get("SELECT name FROM classrooms WHERE id = ?", [classroomId], (classErr, classRow) => {
+                db.all("SELECT student_email FROM classroom_students WHERE classroom_id = ?", [classroomId], (studErr, students) => {
+                    if (!classErr && classRow && students && students.length > 0) {
+                        const studentEmails = students.map(s => s.student_email);
+                        sendAssignmentNotification(studentEmails, title, dueDate, null, classRow.name);
+                    }
+                });
+            });
+
+            res.json({ 
+                id: this.lastID, 
+                title, 
+                dueDate, 
+                filePath: filePath ? `/uploads/assignment-papers/${filePath}` : null
+            });
+        }
+    );
+});
+
+// Get classroom students
+app.get('/api/classrooms/:id/students', (req, res) => {
+    db.all("SELECT * FROM classroom_students WHERE classroom_id = ?", [req.params.id], (err, rows) => {
+        res.json(rows || []);
+    });
+});
+
+// Add student to classroom
+app.post('/api/classrooms/:id/students', (req, res) => {
+    const { student_email } = req.body;
+    const classroomId = req.params.id;
+
+    db.run(
+        "INSERT INTO classroom_students (classroom_id, student_email) VALUES (?, ?)",
+        [classroomId, student_email],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // Get classroom name and teacher email
+            db.get("SELECT name, teacher_email FROM classrooms WHERE id = ?", [classroomId], (classErr, classRow) => {
+                if (!classErr && classRow) {
+                    // Get teacher name
+                    db.get("SELECT name FROM users WHERE email = ?", [classRow.teacher_email], (userErr, userRow) => {
+                        if (!userErr && userRow) {
+                            sendClassroomWelcomeEmail(student_email, classRow.name, userRow.name || 'Teacher');
+                        }
+                    });
+                }
+            });
+
+            res.json({ id: this.lastID, classroom_id: classroomId, student_email });
+        }
+    );
+});
+
+// Get classroom todos
+app.get('/api/classrooms/:id/todos', (req, res) => {
+    db.all("SELECT * FROM classroom_todos WHERE classroom_id = ?", [req.params.id], (err, rows) => {
+        res.json(rows || []);
+    });
+});
+
+// Add todo to classroom
+app.post('/api/classrooms/:id/todos', (req, res) => {
+    const { text } = req.body;
+    const classroomId = req.params.id;
+
+    db.run(
+        "INSERT INTO classroom_todos (classroom_id, text, completed_by) VALUES (?, ?, '[]')",
+        [classroomId, text],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // Get classroom name and student emails for notification
+            db.get("SELECT name FROM classrooms WHERE id = ?", [classroomId], (classErr, classRow) => {
+                db.all("SELECT student_email FROM classroom_students WHERE classroom_id = ?", [classroomId], (studErr, students) => {
+                    if (!classErr && classRow && students && students.length > 0) {
+                        const studentEmails = students.map(s => s.student_email);
+                        sendClassroomTaskNotification(studentEmails, text, classRow.name);
+                    }
+                });
+            });
+
+            res.json({ id: this.lastID, classroom_id: classroomId, text, completed_by: '[]' });
+        }
+    );
+});
+
+// Get assignment submissions
+app.get('/api/assignments/:id/submissions', (req, res) => {
+    db.all("SELECT * FROM classroom_submissions WHERE assignment_id = ?", [req.params.id], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        // Ensure file paths are properly formatted
+        const formattedRows = (rows || []).map(row => ({
+            ...row,
+            filePath: row.filePath ? `/uploads/assignment-submissions/${row.filePath}` : null
+        }));
+        res.json(formattedRows);
+    });
+});
+
+// Submit assignment work
+app.post('/api/assignments/:id/submit', classroomSubmissionUpload.single('file'), (req, res) => {
+    const student_email = String(req.body.student_email || req.body.studentEmail || '').trim().toLowerCase();
+    const filePath = req.file?.filename || null;
+    const fileName = req.file?.originalname || null;
+    const assignmentId = req.params.id;
+
+    if (!student_email) {
+        return res.status(400).json({ error: 'Student email is required.' });
+    }
+    
+    db.run(
+        "INSERT INTO classroom_submissions (assignment_id, student_email, filePath, fileName) VALUES (?, ?, ?, ?)",
+        [assignmentId, student_email, filePath, fileName],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+    // Get assignment title, classroom name and find teacher email
+    db.get("SELECT ca.title, c.teacher_email, c.name as classroom_name FROM classroom_assignments ca JOIN classrooms c ON ca.classroom_id = c.id WHERE ca.id = ?", [assignmentId], (err, row) => {
+        if (!err && row) {
+            // Prevent teacher from submitting to their own assignment
+            if (row.teacher_email === student_email) {
+                return res.status(403).json({ error: 'Teachers cannot submit work to their own assignments.' });
+            }
+            // Notify teacher with student submission
+            sendSubmissionNotification(row.teacher_email, student_email, row.title, row.classroom_name || 'Classroom');
+        }
+    });
+
+            res.json({ 
+                id: this.lastID, 
+                assignment_id: assignmentId, 
+                student_email, 
+                filePath: filePath ? `/uploads/assignment-submissions/${filePath}` : null, 
+                fileName 
+            });
+        }
+    );
+});
+
+// Post grade for submission
+app.post('/api/submissions/:id/grade', (req, res) => {
+    const { marks, feedback } = req.body;
+    const submissionId = req.params.id;
+
+    db.run(
+        "UPDATE classroom_submissions SET marks = ? WHERE id = ?",
+        [marks, submissionId],
+        function (err) {
+            if (err) return res.status(500).json({ error: err.message });
+
+            // Get student email, assignment title, and classroom name
+            db.get("SELECT cs.student_email, ca.title, c.name as classroom_name FROM classroom_submissions cs JOIN classroom_assignments ca ON cs.assignment_id = ca.id JOIN classrooms c ON ca.classroom_id = c.id WHERE cs.id = ?", [submissionId], (err, row) => {
+                if (!err && row) {
+                    // Only notify student about their grade
+                    sendGradingNotification(row.student_email, row.title, marks || 'Not graded', feedback || '', row.classroom_name || 'Classroom');
+                }
+            });
+
+            res.json({ success: true });
+        }
+    );
+});
+
+// Get assignment statistics
+app.get('/api/assignments/:id/statistics', (req, res) => {
+    db.all(
+        "SELECT marks FROM classroom_submissions WHERE assignment_id = ? AND marks IS NOT NULL",
+        [req.params.id],
+        (err, rows) => {
+            try {
+                const marks = (rows || []).map(r => parseFloat(r.marks || 0)).filter(m => !isNaN(m));
+                if (marks.length === 0) {
+                    return res.json({ count: 0, average: 0, highest: 0, lowest: 0, median: 0 });
+                }
+                
+                const sorted = marks.sort((a, b) => a - b);
+                const average = marks.reduce((a, b) => a + b, 0) / marks.length;
+                const median = sorted.length % 2 === 0 
+                    ? (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2
+                    : sorted[Math.floor(sorted.length / 2)];
+                
+                res.json({
+                    count: marks.length,
+                    average: parseFloat(average.toFixed(2)),
+                    highest: Math.max(...marks),
+                    lowest: Math.min(...marks),
+                    median: parseFloat(median.toFixed(2))
+                });
+            } catch (error) {
+                res.json({ count: 0, average: 0, highest: 0, lowest: 0, median: 0 });
+            }
+        }
+    );
+});
+
+// Export marks as CSV
+app.get('/api/assignments/:id/export-marks', (req, res) => {
+    db.all(
+        "SELECT student_email, marks FROM classroom_submissions WHERE assignment_id = ?",
+        [req.params.id],
+        (err, rows) => {
+            try {
+                let csv = '"Student Email","Marks"\n';
+                (rows || []).forEach(r => {
+                    csv += `"${r.student_email}","${r.marks || 'Not Graded'}"\n`;
+                });
+                res.setHeader('Content-Type', 'text/csv');
+                res.send(csv);
+            } catch (error) {
+                res.status(500).json({ error: error.message });
+            }
+        }
+    );
+});
+
+// Toggle todo completion
+app.post('/api/todos/:id/toggle', (req, res) => {
+    const { student_email } = req.body;
+    db.get("SELECT completed_by FROM classroom_todos WHERE id = ?", [req.params.id], (err, row) => {
+        if (!row) return res.status(404).json({ error: 'Todo not found' });
+        const completed = JSON.parse(row.completed_by || '[]');
+        const index = completed.indexOf(student_email);
+        if (index > -1) completed.splice(index, 1);
+        else completed.push(student_email);
+        
+        db.run("UPDATE classroom_todos SET completed_by = ? WHERE id = ?", [JSON.stringify(completed), req.params.id], 
+            () => res.json({ success: true }));
     });
 });
 
